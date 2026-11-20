@@ -1894,39 +1894,147 @@
         function clientEngineStep3() {
             if (!pipelineData || !pipelineData.raw_rows) return;
             const rawRows = pipelineData.raw_rows;
-            const cols = pipelineData.step2.columns;
-            const cleaned = [];
-            const seen = new Set();
-            rawRows.forEach(r => {
-                const key = JSON.stringify(r);
-                if (!seen.has(key)) {
-                    seen.add(key);
-                    const newRow = { ...r };
-                    cols.forEach(c => {
-                        if (newRow[c] === null || newRow[c] === undefined || newRow[c] === "") {
-                            newRow[c] = 0;
-                        }
+            const cols = (pipelineData.step2 && (pipelineData.step2.columns || pipelineData.step2.preview_columns)) || 
+                         (rawRows[0] ? Object.keys(rawRows[0]) : []);
+            
+            // Helper parsing numbers
+            const parseNum = (v) => {
+                if (typeof v === 'number') return isNaN(v) ? null : v;
+                if (v === null || v === undefined || v === '') return null;
+                const clean = String(v).replace(/[^0-9.-]/g, '');
+                if (clean === '' || clean === '-' || clean === '.') return null;
+                const n = parseFloat(clean);
+                return isNaN(n) ? null : n;
+            };
+
+            // Identify numeric vs categorical columns
+            const colTypes = {};
+            cols.forEach(c => {
+                let numCount = 0, totalCount = 0;
+                rawRows.slice(0, 100).forEach(r => {
+                    if (r[c] !== null && r[c] !== undefined && String(r[c]).trim() !== '') {
+                        totalCount++;
+                        if (parseNum(r[c]) !== null) numCount++;
+                    }
+                });
+                colTypes[c] = (totalCount > 0 && (numCount / totalCount) >= 0.5) ? 'numeric' : 'text';
+            });
+
+            // Compute statistics before cleaning for numeric columns
+            const statsBefore = {};
+            cols.forEach(c => {
+                if (colTypes[c] === 'numeric') {
+                    const vals = [];
+                    rawRows.forEach(r => {
+                        const n = parseNum(r[c]);
+                        if (n !== null) vals.push(n);
                     });
-                    cleaned.push(newRow);
+                    if (vals.length > 0) {
+                        vals.sort((a, b) => a - b);
+                        const sum = vals.reduce((acc, v) => acc + v, 0);
+                        const mean = sum / vals.length;
+                        const median = vals.length % 2 === 0 
+                            ? (vals[vals.length / 2 - 1] + vals[vals.length / 2]) / 2 
+                            : vals[Math.floor(vals.length / 2)];
+                        const min = vals[0];
+                        const max = vals[vals.length - 1];
+                        const variance = vals.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / (vals.length > 1 ? vals.length - 1 : 1);
+                        statsBefore[c] = {
+                            count: vals.length,
+                            mean: Math.round(mean * 100) / 100,
+                            median: Math.round(median * 100) / 100,
+                            min: Math.round(min * 100) / 100,
+                            max: Math.round(max * 100) / 100,
+                            std: Math.round(Math.sqrt(variance) * 100) / 100
+                        };
+                    }
                 }
             });
 
-            pipelineData.cleaned_rows = cleaned;
-            const missingCount = (pipelineData.step2 && pipelineData.step2.health_summary && pipelineData.step2.health_summary.total_missing_cells) || 0;
-            const dupsCount = rawRows.length - cleaned.length;
-            pipelineData.step3 = {
-                has_cleaned: true,
-                summary: {
-                    rows_before: rawRows.length,
-                    rows_after: cleaned.length,
-                    duplicates_removed: dupsCount,
-                    removed_duplicates: dupsCount,
-                    cells_filled: missingCount,
-                    fixed_cells: missingCount,
-                    outliers_treated: 0
-                },
-                preview_cleaned_rows: cleaned.slice(0, 10),
-                stats_comparison: cols.map(c => ({
+            // Clean rows
+            const cleaned = [];
+            const seen = new Set();
+            let dupsCount = 0;
+            let cellsFilled = 0;
+            let outliersTreated = 0;
+
+            rawRows.forEach(r => {
+                const key = JSON.stringify(r);
+                if (seen.has(key)) {
+                    dupsCount++;
+                    return;
+                }
+                seen.add(key);
+
+                const newRow = { ...r };
+                cols.forEach(c => {
+                    const isNum = (colTypes[c] === 'numeric');
+                    const val = newRow[c];
+                    if (val === null || val === undefined || String(val).trim() === '') {
+                        cellsFilled++;
+                        if (isNum) {
+                            newRow[c] = statsBefore[c] ? statsBefore[c].median : 0;
+                        } else {
+                            newRow[c] = 'Chưa phân loại';
+                        }
+                    } else if (isNum) {
+                        const n = parseNum(val);
+                        if (n === null) {
+                            cellsFilled++;
+                            newRow[c] = statsBefore[c] ? statsBefore[c].median : 0;
+                        } else {
+                            // Check negative numbers for non-profit/non-growth columns
+                            if (n < 0 && !/lợi\s*nhuận|profit|lãi|tăng\s*trưởng|diff/i.test(c)) {
+                                outliersTreated++;
+                                newRow[c] = 0;
+                            } else {
+                                newRow[c] = n;
+                            }
+                        }
+                    } else {
+                        newRow[c] = String(val).trim();
+                    }
+                });
+                cleaned.push(newRow);
+            });
+
+            // Compute statistics after cleaning
+            const statsComparison = cols.map(c => {
+                if (colTypes[c] === 'numeric') {
+                    const vals = [];
+                    cleaned.forEach(r => {
+                        const n = parseNum(r[c]);
+                        if (n !== null) vals.push(n);
+                    });
+                    if (vals.length > 0) {
+                        vals.sort((a, b) => a - b);
+                        const sum = vals.reduce((acc, v) => acc + v, 0);
+                        const mean = sum / vals.length;
+                        const median = vals.length % 2 === 0 
+                            ? (vals[vals.length / 2 - 1] + vals[vals.length / 2]) / 2 
+                            : vals[Math.floor(vals.length / 2)];
+                        const min = vals[0];
+                        const max = vals[vals.length - 1];
+                        const variance = vals.reduce((acc, v) => acc + Math.pow(v - mean, 2), 0) / (vals.length > 1 ? vals.length - 1 : 1);
+                        const sb = statsBefore[c] || { count: rawRows.length, mean: mean, median: median, min: min, max: max, std: 0 };
+                        return {
+                            column: c,
+                            count_before: sb.count,
+                            count_after: vals.length,
+                            mean_before: sb.mean,
+                            mean_after: Math.round(mean * 100) / 100,
+                            median_before: sb.median,
+                            median_after: Math.round(median * 100) / 100,
+                            min_before: sb.min,
+                            min_after: Math.round(min * 100) / 100,
+                            max_before: sb.max,
+                            max_after: Math.round(max * 100) / 100,
+                            std_before: sb.std,
+                            std_after: Math.round(Math.sqrt(variance) * 100) / 100
+                        };
+                    }
+                }
+                return {
                     column: c,
                     count_before: rawRows.length,
                     count_after: cleaned.length,
@@ -1940,144 +2048,416 @@
                     max_after: '-',
                     std_before: '-',
                     std_after: '-'
-                }))
+                };
+            });
+
+            pipelineData.cleaned_rows = cleaned;
+            pipelineData.step3 = {
+                has_cleaned: true,
+                summary: {
+                    rows_before: rawRows.length,
+                    rows_after: cleaned.length,
+                    duplicates_removed: dupsCount,
+                    removed_duplicates: dupsCount,
+                    cells_filled: cellsFilled,
+                    fixed_cells: cellsFilled,
+                    outliers_treated: outliersTreated
+                },
+                preview_columns: cols,
+                columns: cols,
+                preview_rows: cleaned.slice(0, 15),
+                preview_cleaned_rows: cleaned.slice(0, 15),
+                stats_comparison: statsComparison
             };
+
             pipelineData.current_unlocked_step = Math.max(pipelineData.current_unlocked_step || 1, 4);
             unlockedStep = pipelineData.current_unlocked_step;
             renderAllSteps(pipelineData);
             updateStepperUI();
         }
 
-        function clientEngineStep4Dashboard() {
-            const rows = (pipelineData && (pipelineData.cleaned_rows || pipelineData.raw_rows)) || [];
+        function clientEngineStep4Dashboard(customRows) {
+            const rows = customRows || (pipelineData && (pipelineData.cleaned_rows || pipelineData.raw_rows)) || [];
             if (rows.length === 0) return;
-            const cols = Object.keys(rows[0]);
+            const cols = (pipelineData.step3 && pipelineData.step3.preview_columns) || 
+                         (pipelineData.step2 && pipelineData.step2.columns) || 
+                         Object.keys(rows[0]);
 
-            const revCol = cols.find(c => /doanh\s*thu|revenue|sales|gmv|thành\s*tiền|tiền\s*bán/i.test(c)) || cols.find(c => /giá\s*bán|tổng/i.test(c)) || cols[0];
+            const parseNum = (v) => {
+                if (typeof v === 'number') return isNaN(v) ? 0 : v;
+                if (!v) return 0;
+                const clean = String(v).replace(/[^0-9.-]/g, '');
+                const n = parseFloat(clean);
+                return isNaN(n) ? 0 : n;
+            };
+
+            // Identify column roles dynamically
+            const revCol = cols.find(c => /doanh\s*thu|revenue|sales|gmv|thành\s*tiền|tiền\s*bán/i.test(c)) || 
+                           cols.find(c => /giá\s*bán|tổng\s*tiền/i.test(c));
             const costCol = cols.find(c => /chi\s*phí\s*ads|chi\s*phí|ad_spend|spend|ads|quảng\s*cáo/i.test(c));
             const profitCol = cols.find(c => /lợi\s*nhuận|profit|lãi/i.test(c));
-            const catCol = cols.find(c => /kênh|channel|nhóm|category|danh\s*mục|loại|sản\s*phẩm/i.test(c)) || cols[1] || cols[0];
+            const orderCol = cols.find(c => /số\s*lượng|đơn\s*hàng|orders|quantity|lượng\s*bán/i.test(c));
+            const retCol = cols.find(c => /hoàn|return|hủy|refund/i.test(c));
+            const trafficCol = cols.find(c => /traffic|lượt\s*xem|views|click|sessions/i.test(c));
+            const cogsCol = cols.find(c => /giá\s*vốn|cogs|chi\s*phí\s*sản\s*phẩm|vốn/i.test(c));
             const dateCol = cols.find(c => /ngày|date|tháng|month|time|thời\s*gian/i.test(c));
 
-            let totalRev = 0, totalCost = 0, totalProfit = 0;
-            const catMap = {}, dateMap = {};
+            // Metric columns set
+            const metricSet = new Set([revCol, costCol, profitCol, orderCol, retCol, trafficCol, cogsCol, dateCol].filter(Boolean));
+            let dimCols = cols.filter(c => !metricSet.has(c));
+            if (dimCols.length === 0) {
+                dimCols = cols.filter(c => c !== revCol && c !== dateCol);
+                if (dimCols.length === 0) dimCols = [cols[0]];
+            }
 
-            rows.forEach(r => {
-                const rev = parseFloat(String(r[revCol] || 0).replace(/[,đ\s]/g, '')) || 0;
-                const cost = costCol ? (parseFloat(String(r[costCol] || 0).replace(/[,đ\s]/g, '')) || 0) : Math.round(rev * 0.22);
-                const profit = profitCol ? (parseFloat(String(r[profitCol] || 0).replace(/[,đ\s]/g, '')) || 0) : (rev - cost);
-                totalRev += rev;
-                totalCost += cost;
-                totalProfit += profit;
+            const hasAds = !!costCol;
+            const hasProfit = !!profitCol || !!cogsCol;
+            const scenario = (hasAds && hasProfit) ? 'A' : (hasProfit || hasAds ? 'B' : 'A');
 
-                const cat = String(r[catCol] || 'Chung').trim();
-                if (!catMap[cat]) catMap[cat] = { name: cat, revenue: 0, ad_spend: 0, net_profit: 0 };
-                catMap[cat].revenue += rev;
-                catMap[cat].ad_spend += cost;
-                catMap[cat].net_profit += profit;
+            // Generate scorecard, scatter, and quadrant counts for each available dimension
+            const scorecards_by_dim = {};
+            const scatters_by_dim = {};
+            const quads_by_dim = {};
 
-                if (dateCol) {
-                    const d = String(r[dateCol] || '').slice(0, 10);
-                    if (d) {
-                        if (!dateMap[d]) dateMap[d] = { date: d, revenue: 0, ad_spend: 0, net_profit: 0 };
-                        dateMap[d].revenue += rev;
-                        dateMap[d].ad_spend += cost;
-                        dateMap[d].net_profit += profit;
+            dimCols.forEach(dimCol => {
+                const groupMap = {};
+                let dimTotalRev = 0, dimTotalProfit = 0;
+
+                rows.forEach(r => {
+                    const rawVal = r[dimCol];
+                    const catName = (rawVal === null || rawVal === undefined || String(rawVal).trim() === '') 
+                        ? 'Chưa phân loại' 
+                        : String(rawVal).trim();
+
+                    if (!groupMap[catName]) {
+                        groupMap[catName] = {
+                            name: catName,
+                            revenue: 0,
+                            ad_spend: 0,
+                            net_profit: 0,
+                            cogs: 0,
+                            orders: 0,
+                            returned_orders: 0,
+                            traffic: 0
+                        };
                     }
+
+                    const g = groupMap[catName];
+                    const rev = revCol ? parseNum(r[revCol]) : 0;
+                    const spend = costCol ? parseNum(r[costCol]) : Math.round(rev * 0.22);
+                    const cogs = cogsCol ? parseNum(r[cogsCol]) : Math.round(rev * 0.40);
+                    const profit = profitCol ? parseNum(r[profitCol]) : (rev - spend - cogs);
+                    const ord = orderCol ? (parseNum(r[orderCol]) || 1) : 1;
+                    const ret = retCol ? parseNum(r[retCol]) : 0;
+                    const traf = trafficCol ? parseNum(r[trafficCol]) : Math.round(ord * 35);
+
+                    g.revenue += rev;
+                    g.ad_spend += spend;
+                    g.cogs += cogs;
+                    g.net_profit += profit;
+                    g.orders += ord;
+                    g.returned_orders += ret;
+                    g.traffic += traf;
+
+                    dimTotalRev += rev;
+                    dimTotalProfit += profit;
+                });
+
+                const groupList = Object.values(groupMap);
+                const avgRev = groupList.length > 0 ? (dimTotalRev / groupList.length) : 0;
+                const avgProfit = groupList.length > 0 ? (dimTotalProfit / groupList.length) : 0;
+
+                const scList = [];
+                const scatList = [];
+                const qc = {
+                    '🌟 Ngôi sao tăng trưởng': 0, '🐄 Bò sữa sinh lời': 0, '⚠️ Bẫy doanh thu ảo': 0, '🔥 Đốt tiền / Cần cắt lỗ': 0,
+                    'Star': 0, 'Cash Cow': 0, 'Volume Trap': 0, 'Cash Burner': 0
+                };
+
+                groupList.sort((a, b) => b.revenue - a.revenue).forEach(g => {
+                    const retRate = g.orders > 0 ? +((g.returned_orders / g.orders) * 100).toFixed(1) : 0;
+                    const cr = g.traffic > 0 ? +((g.orders / g.traffic) * 100).toFixed(2) : 2.5;
+                    const aov = g.orders > 0 ? Math.round(g.revenue / g.orders) : 0;
+                    const cpa = g.orders > 0 ? Math.round(g.ad_spend / g.orders) : 0;
+                    const cir = g.revenue > 0 ? +((g.ad_spend / g.revenue) * 100).toFixed(1) : 0;
+                    const margin = g.revenue > 0 ? +((g.net_profit / g.revenue) * 100).toFixed(1) : 0;
+                    const roas = g.ad_spend > 0 ? +(g.revenue / g.ad_spend).toFixed(2) : 3.2;
+                    const netRealized = Math.max(0, Math.round(g.revenue * (1 - (retRate / 100))));
+
+                    let quad = '🌟 Ngôi sao tăng trưởng';
+                    if (g.revenue >= avgRev && g.net_profit >= avgProfit) { quad = '🌟 Ngôi sao tăng trưởng'; qc['Star']++; qc['🌟 Ngôi sao tăng trưởng']++; }
+                    else if (g.revenue < avgRev && g.net_profit >= avgProfit) { quad = '🐄 Bò sữa sinh lời'; qc['Cash Cow']++; qc['🐄 Bò sữa sinh lời']++; }
+                    else if (g.revenue >= avgRev && g.net_profit < avgProfit) { quad = '⚠️ Bẫy doanh thu ảo'; qc['Volume Trap']++; qc['⚠️ Bẫy doanh thu ảo']++; }
+                    else { quad = '🔥 Đốt tiền / Cần cắt lỗ'; qc['Cash Burner']++; qc['🔥 Đốt tiền / Cần cắt lỗ']++; }
+
+                    let alert = '🟢 Tối ưu';
+                    if (g.net_profit < 0 || retRate > 15 || cir > 45) { alert = '🔴 Nguy hiểm'; }
+                    else if (retRate >= 8 || cir > 30 || margin < 10) { alert = '🟡 Cảnh báo'; }
+
+                    scList.push({
+                        name: g.name,
+                        quadrant: quad,
+                        alert: alert,
+                        revenue: Math.round(g.revenue),
+                        net_realized_revenue: netRealized,
+                        orders: Math.round(g.orders),
+                        returned_orders: Math.round(g.returned_orders),
+                        return_rate: retRate,
+                        traffic: Math.round(g.traffic),
+                        cr_percent: cr,
+                        aov: aov,
+                        ad_spend: Math.round(g.ad_spend),
+                        cogs: Math.round(g.cogs),
+                        cpa: cpa,
+                        cir_percent: cir,
+                        net_profit: Math.round(g.net_profit),
+                        net_margin_percent: margin,
+                        roas: roas
+                    });
+
+                    scatList.push({
+                        name: g.name,
+                        x: roas,
+                        y: margin,
+                        revenue: Math.round(g.revenue),
+                        quadrant: quad
+                    });
+                });
+
+                scorecards_by_dim[dimCol] = scList;
+                scatters_by_dim[dimCol] = scatList;
+                quads_by_dim[dimCol] = qc;
+            });
+
+            const primaryDim = dimCols[0];
+            const primaryScorecard = scorecards_by_dim[primaryDim] || [];
+            const primaryScatter = scatters_by_dim[primaryDim] || [];
+            const primaryQuads = quads_by_dim[primaryDim] || {
+                '🌟 Ngôi sao tăng trưởng': 0, '🐄 Bò sữa sinh lời': 0, '⚠️ Bẫy doanh thu ảo': 0, '🔥 Đốt tiền / Cần cắt lỗ': 0,
+                'Star': 0, 'Cash Cow': 0, 'Volume Trap': 0, 'Cash Burner': 0
+            };
+
+            // Pivot 1: Dim 1 x Dim 2 (or Dim 1 x Date Month/Overall)
+            const p1RowDim = dimCols[0];
+            const p1ColDim = dimCols.length > 1 ? dimCols[1] : (dateCol || 'Toàn sàn');
+            const pivot1Map = {};
+            rows.forEach(r => {
+                const rVal = String(r[p1RowDim] || 'Chưa phân loại').trim();
+                let cVal = 'Tất cả';
+                if (p1ColDim === dateCol && r[dateCol]) {
+                    cVal = String(r[dateCol]).slice(0, 7) || 'Tất cả';
+                } else if (p1ColDim !== 'Toàn sàn') {
+                    cVal = String(r[p1ColDim] || 'Tất cả').trim();
                 }
+                const key = rVal + '____' + cVal;
+                if (!pivot1Map[key]) pivot1Map[key] = { row_dim: rVal, col_dim: cVal, rev: 0, cost: 0, profit: 0, orders: 0, ret: 0 };
+                const rev = revCol ? parseNum(r[revCol]) : 0;
+                const cost = costCol ? parseNum(r[costCol]) : Math.round(rev * 0.22);
+                const cogs = cogsCol ? parseNum(r[cogsCol]) : Math.round(rev * 0.40);
+                const profit = profitCol ? parseNum(r[profitCol]) : (rev - cost - cogs);
+                const ord = orderCol ? (parseNum(r[orderCol]) || 1) : 1;
+                const ret = retCol ? parseNum(r[retCol]) : 0;
+                pivot1Map[key].rev += rev;
+                pivot1Map[key].cost += cost;
+                pivot1Map[key].profit += profit;
+                pivot1Map[key].orders += ord;
+                pivot1Map[key].ret += ret;
             });
 
-            const catList = Object.values(catMap);
-            const avgProfit = catList.length > 0 ? (totalProfit / catList.length) : 0;
-            const avgRev = catList.length > 0 ? (totalRev / catList.length) : 0;
-
-            let star = 0, cow = 0, trap = 0, burner = 0;
-            const scorecard = [], scatterPts = [];
-
-            catList.forEach(c => {
-                const roas = c.ad_spend > 0 ? +(c.revenue / c.ad_spend).toFixed(2) : 3.0;
-                const margin = c.revenue > 0 ? +((c.net_profit / c.revenue) * 100).toFixed(1) : 0;
-                let q = '🌟 Ngôi sao tăng trưởng';
-                if (c.revenue >= avgRev && c.net_profit >= avgProfit) { q = '🌟 Ngôi sao tăng trưởng'; star++; }
-                else if (c.revenue < avgRev && c.net_profit >= avgProfit) { q = '🐄 Bò sữa sinh lời'; cow++; }
-                else if (c.revenue >= avgRev && c.net_profit < avgProfit) { q = '⚠️ Bẫy doanh thu ảo'; trap++; }
-                else { q = '🔥 Đốt tiền / Cần cắt lỗ'; burner++; }
-
-                scorecard.push({
-                    name: c.name,
-                    quadrant: q,
-                    revenue: c.revenue,
-                    ad_spend: c.ad_spend,
-                    net_profit: c.net_profit,
-                    net_margin_percent: margin,
+            const pivot_camp_chan = Object.values(pivot1Map).sort((a, b) => b.rev - a.rev).slice(0, 30).map(p => {
+                const retRate = p.orders > 0 ? +((p.ret / p.orders) * 100).toFixed(1) : 0;
+                const roas = p.cost > 0 ? +(p.rev / p.cost).toFixed(2) : 3.0;
+                const margin = p.rev > 0 ? +((p.profit / p.rev) * 100).toFixed(1) : 0;
+                const netRev = Math.max(0, Math.round(p.rev * (1 - (retRate / 100))));
+                let alert = 'GREEN';
+                if (retRate > 15 || p.profit < 0) alert = 'RED';
+                else if (retRate >= 8 || margin < 10) alert = 'YELLOW';
+                return {
+                    row_dim: p.row_dim,
+                    col_dim: p.col_dim,
+                    revenue: Math.round(p.rev),
+                    net_revenue: netRev,
+                    orders: Math.round(p.orders),
+                    return_rate: retRate,
+                    ad_spend: Math.round(p.cost),
+                    net_profit: Math.round(p.profit),
+                    net_margin: margin,
                     roas: roas,
-                    status: c.net_profit > 0 ? 'Hiệu quả' : 'Cảnh báo'
-                });
-
-                scatterPts.push({
-                    name: c.name,
-                    x: roas,
-                    y: margin,
-                    revenue: c.revenue,
-                    quadrant: q
-                });
+                    alert: alert
+                };
             });
 
-            const timeLabels = Object.keys(dateMap).sort().slice(0, 15);
+            // Pivot 2: Dim 2 x Dim 3 or Category x Region
+            const p2RowDim = dimCols.length > 1 ? dimCols[1] : dimCols[0];
+            const p2ColDim = dimCols.length > 2 ? dimCols[2] : (dimCols.length > 1 ? dimCols[0] : 'Khu vực Chung');
+            const pivot2Map = {};
+            rows.forEach(r => {
+                const rVal = String(r[p2RowDim] || 'Chưa phân loại').trim();
+                const cVal = p2ColDim === 'Khu vực Chung' ? 'Toàn quốc' : String(r[p2ColDim] || 'Chưa phân loại').trim();
+                const key = rVal + '____' + cVal;
+                if (!pivot2Map[key]) pivot2Map[key] = { row_dim: rVal, col_dim: cVal, rev: 0, cost: 0, profit: 0, orders: 0, ret: 0 };
+                const rev = revCol ? parseNum(r[revCol]) : 0;
+                const cost = costCol ? parseNum(r[costCol]) : Math.round(rev * 0.22);
+                const cogs = cogsCol ? parseNum(r[cogsCol]) : Math.round(rev * 0.40);
+                const profit = profitCol ? parseNum(r[profitCol]) : (rev - cost - cogs);
+                const ord = orderCol ? (parseNum(r[orderCol]) || 1) : 1;
+                const ret = retCol ? parseNum(r[retCol]) : 0;
+                pivot2Map[key].rev += rev;
+                pivot2Map[key].cost += cost;
+                pivot2Map[key].profit += profit;
+                pivot2Map[key].orders += ord;
+                pivot2Map[key].ret += ret;
+            });
+
+            const pivot_cat_reg = Object.values(pivot2Map).sort((a, b) => b.rev - a.rev).slice(0, 30).map(p => {
+                const retRate = p.orders > 0 ? +((p.ret / p.orders) * 100).toFixed(1) : 0;
+                const margin = p.rev > 0 ? +((p.profit / p.rev) * 100).toFixed(1) : 0;
+                const netRev = Math.max(0, Math.round(p.rev * (1 - (retRate / 100))));
+                let alert = 'GREEN';
+                if (retRate > 15 || p.profit < 0) alert = 'RED';
+                else if (retRate >= 8 || margin < 10) alert = 'YELLOW';
+                return {
+                    row_dim: p.row_dim,
+                    col_dim: p.col_dim,
+                    revenue: Math.round(p.rev),
+                    net_revenue: netRev,
+                    orders: Math.round(p.orders),
+                    return_rate: retRate,
+                    net_profit: Math.round(p.profit),
+                    net_margin: margin,
+                    alert: alert
+                };
+            });
+
+            // Pivot 3: Daily Activity Log & Trend
+            const dateMap = {};
+            rows.forEach((r, idx) => {
+                let d = dateCol ? String(r[dateCol] || '').slice(0, 10) : '';
+                if (!d || d.length < 4) d = 'Kỳ ' + (Math.floor(idx / 10) + 1);
+                if (!dateMap[d]) dateMap[d] = { date: d, revenue: 0, spend: 0, net_profit: 0, orders: 0 };
+                const rev = revCol ? parseNum(r[revCol]) : 0;
+                const spend = costCol ? parseNum(r[costCol]) : Math.round(rev * 0.22);
+                const cogs = cogsCol ? parseNum(r[cogsCol]) : Math.round(rev * 0.40);
+                const profit = profitCol ? parseNum(r[profitCol]) : (rev - spend - cogs);
+                const ord = orderCol ? (parseNum(r[orderCol]) || 1) : 1;
+                dateMap[d].revenue += rev;
+                dateMap[d].spend += spend;
+                dateMap[d].net_profit += profit;
+                dateMap[d].orders += ord;
+            });
+
+            const dateKeys = Object.keys(dateMap).sort();
+            const daily_activity_log = dateKeys.slice(-30).map(d => {
+                const item = dateMap[d];
+                const cir = item.revenue > 0 ? +((item.spend / item.revenue) * 100).toFixed(1) : 0;
+                let anom = 'Ổn định';
+                if (item.net_profit < 0) anom = 'Cảnh báo: Lỗ ròng / Chi phí vượt thu';
+                else if (cir > 35) anom = 'CIR cao (>35%)';
+                return {
+                    date: item.date,
+                    revenue: Math.round(item.revenue),
+                    orders: Math.round(item.orders),
+                    spend: Math.round(item.spend),
+                    net_profit: Math.round(item.net_profit),
+                    cir: cir,
+                    anomaly: anom
+                };
+            });
+
+            // Overall KPIs
+            let totRev = 0, totCost = 0, totProfit = 0, totOrders = 0, totReturned = 0, totTraffic = 0;
+            primaryScorecard.forEach(s => {
+                totRev += s.revenue;
+                totCost += s.ad_spend;
+                totProfit += s.net_profit;
+                totOrders += s.orders;
+                totReturned += s.returned_orders;
+                totTraffic += s.traffic;
+            });
+            const totNetRev = Math.max(0, Math.round(totRev * (1 - (totReturned / Math.max(1, totOrders)))));
+            const retRateSys = totOrders > 0 ? +((totReturned / totOrders) * 100).toFixed(1) : 0;
+            const cirSys = totRev > 0 ? +((totCost / totRev) * 100).toFixed(1) : 0;
+            const marginSys = totRev > 0 ? +((totProfit / totRev) * 100).toFixed(1) : 0;
+            const roasSys = totCost > 0 ? +(totRev / totCost).toFixed(2) : 3.5;
+            const aovSys = totOrders > 0 ? Math.round(totRev / totOrders) : 0;
+            const sysAlert = (totProfit < 0 || retRateSys > 15) ? '🔴 CẢNH BÁO ĐỎ (NGUY HIỂM)' :
+                ((retRateSys >= 8 || cirSys > 30 || marginSys < 10) ? '🟡 CẢNH BÁO VÀNG' : '🟢 HỆ THỐNG TỐI ƯU (XANH)');
+
+            // Dynamic filter options
+            const filter_options = {};
+            dimCols.forEach(dc => {
+                const uniqueVals = [...new Set(rows.map(r => String(r[dc] || '').trim()).filter(Boolean))].slice(0, 30);
+                if (uniqueVals.length > 0) filter_options[dc] = uniqueVals;
+            });
+
+            const timeLabels = dateKeys.slice(-15);
             const s5 = {
                 has_dashboard: true,
-                scenario: costCol ? 'A' : 'B',
+                scenario: scenario,
+                available_dimensions: dimCols,
+                primary_dimension: primaryDim,
+                filter_options: filter_options,
+                pivot_meta: {
+                    p1_row: p1RowDim,
+                    p1_col: p1ColDim,
+                    p2_row: p2RowDim,
+                    p2_col: p2ColDim
+                },
                 kpis: {
-                    total_revenue: totalRev,
-                    total_cost: totalCost,
-                    net_profit: totalProfit,
-                    total_orders: rows.length,
-                    aov: rows.length > 0 ? Math.round(totalRev / rows.length) : 0,
-                    roas: totalCost > 0 ? +(totalRev / totalCost).toFixed(2) : 3.5,
-                    net_margin_percent: totalRev > 0 ? +((totalProfit / totalRev) * 100).toFixed(1) : 18.5,
-                    cir_percent: totalRev > 0 ? +((totalCost / totalRev) * 100).toFixed(1) : 22.0,
-                    system_alert: totalProfit > 0 ? '🟢 HỆ THỐNG TỐI ƯU (XANH)' : '🔴 CẢNH BÁO ĐỎ (NGUY HIỂM)'
+                    total_revenue: totRev,
+                    net_realized_revenue: totNetRev,
+                    total_cost: totCost,
+                    total_ad_spend: totCost,
+                    total_cogs: Math.max(0, totRev - totCost - totProfit),
+                    net_profit: totProfit,
+                    gross_profit: totRev - totCost,
+                    total_orders: totOrders,
+                    total_returned: totReturned,
+                    total_traffic: totTraffic,
+                    return_rate: retRateSys,
+                    cr_percent: totTraffic > 0 ? +((totOrders / totTraffic) * 100).toFixed(2) : 2.5,
+                    aov: aovSys,
+                    cpa: totOrders > 0 ? Math.round(totCost / totOrders) : 0,
+                    roas: roasSys,
+                    net_margin_percent: marginSys,
+                    cir_percent: cirSys,
+                    system_alert: sysAlert
                 },
-                quadrant_counts: {
-                    '🌟 Ngôi sao tăng trưởng': star,
-                    '🐄 Bò sữa sinh lời': cow,
-                    '⚠️ Bẫy doanh thu ảo': trap,
-                    '🔥 Đốt tiền / Cần cắt lỗ': burner,
-                    'Star': star,
-                    'Cash Cow': cow,
-                    'Volume Trap': trap,
-                    'Cash Burner': burner
-                },
+                quadrant_counts: primaryQuads,
                 time_trend: {
                     is_date: timeLabels.length > 0,
-                    labels: timeLabels.length > 0 ? timeLabels : catList.slice(0, 8).map(c => c.name),
-                    revenue: timeLabels.length > 0 ? timeLabels.map(d => dateMap[d].revenue) : catList.slice(0, 8).map(c => c.revenue),
-                    ad_spend: timeLabels.length > 0 ? timeLabels.map(d => dateMap[d].ad_spend) : catList.slice(0, 8).map(c => c.ad_spend),
-                    net_profit: timeLabels.length > 0 ? timeLabels.map(d => dateMap[d].net_profit) : catList.slice(0, 8).map(c => c.net_profit)
+                    labels: timeLabels.length > 0 ? timeLabels : primaryScorecard.slice(0, 8).map(c => c.name),
+                    revenue: timeLabels.length > 0 ? timeLabels.map(d => dateMap[d].revenue) : primaryScorecard.slice(0, 8).map(c => c.revenue),
+                    ad_spend: timeLabels.length > 0 ? timeLabels.map(d => dateMap[d].spend) : primaryScorecard.slice(0, 8).map(c => c.ad_spend),
+                    net_profit: timeLabels.length > 0 ? timeLabels.map(d => dateMap[d].net_profit) : primaryScorecard.slice(0, 8).map(c => c.net_profit)
                 },
                 grouped_bar: {
-                    labels: catList.slice(0, 7).map(c => c.name),
-                    revenue: catList.slice(0, 7).map(c => c.revenue),
-                    ad_spend: catList.slice(0, 7).map(c => c.ad_spend),
-                    net_profit: catList.slice(0, 7).map(c => c.net_profit)
+                    labels: primaryScorecard.slice(0, 7).map(c => c.name),
+                    revenue: primaryScorecard.slice(0, 7).map(c => c.revenue),
+                    ad_spend: primaryScorecard.slice(0, 7).map(c => c.ad_spend),
+                    net_profit: primaryScorecard.slice(0, 7).map(c => c.net_profit)
                 },
                 cat_donut: {
-                    labels: catList.slice(0, 6).map(c => c.name),
-                    revenue: catList.slice(0, 6).map(c => c.revenue)
+                    labels: primaryScorecard.slice(0, 6).map(c => c.name),
+                    revenue: primaryScorecard.slice(0, 6).map(c => c.revenue)
                 },
-                matrix_scatter: scatterPts,
-                scorecard: scorecard,
+                matrix_scatter: primaryScatter,
+                scorecard: primaryScorecard,
+                scorecards_by_dim: scorecards_by_dim,
+                pivot_camp_chan: pivot_camp_chan,
+                pivot_cat_reg: pivot_cat_reg,
+                daily_activity_log: daily_activity_log,
                 playbook: {
                     highlights: [
-                        "Đẩy mạnh ngân sách cho nhóm Ngôi Sao (" + star + " nhóm) đang có ROAS cao và biên lợi nhuận ròng vượt trội.",
-                        "Duy trì ổn định nhóm Bò Sữa (" + cow + " nhóm) để tạo dòng tiền tự do phục vụ mở rộng kinh doanh."
+                        "Đẩy mạnh ngân sách cho nhóm Ngôi Sao (" + (primaryQuads['Star'] || 0) + " nhóm) đang có ROAS cao và biên lợi nhuận ròng vượt trội.",
+                        "Duy trì ổn định nhóm Bò Sữa (" + (primaryQuads['Cash Cow'] || 0) + " nhóm) để tạo dòng tiền tự do phục vụ mở rộng kinh doanh."
                     ],
                     bottlenecks: [
-                        "Cần kiểm soát ngay nhóm Bẫy Doanh Thu (" + trap + " nhóm): Doanh thu cao nhưng biên lợi nhuận quá mỏng.",
-                        "Tối ưu lại quy trình chuyển đổi và chi phí vận chuyển để giảm tỷ lệ hao hụt."
+                        "Cần kiểm soát ngay nhóm Bẫy Doanh Thu (" + (primaryQuads['Volume Trap'] || 0) + " nhóm): Doanh thu cao nhưng biên lợi nhuận quá mỏng.",
+                        "Tối ưu lại quy trình chuyển đổi và chi phí vận chuyển để giảm tỷ lệ hoàn đơn."
                     ],
                     actions: [
-                        "Cắt giảm tối thiểu 30-50% chi phí Ads ở nhóm Cash Burner (" + burner + " nhóm) đang bị âm lợi nhuận.",
+                        "Cắt giảm tối thiểu 30-50% chi phí Ads ở nhóm Cash Burner (" + (primaryQuads['Cash Burner'] || 0) + " nhóm) đang bị âm lợi nhuận.",
                         "Đàm phán lại giá vốn sản phẩm hoặc tăng giá bán các gói combo để bù đắp chi phí quảng cáo."
                     ]
                 }
@@ -2596,30 +2976,47 @@
             const sum = step3.summary || {};
             document.getElementById('log-rows-before').innerText = formatNum(sum.rows_before);
             document.getElementById('log-rows-after').innerText = formatNum(sum.rows_after);
-            document.getElementById('log-cells-filled').innerText = formatNum(sum.cells_filled);
-            document.getElementById('log-dups-removed').innerText = formatNum(sum.duplicates_removed);
-            document.getElementById('log-outliers-treated').innerText = formatNum(sum.outliers_treated);
+            document.getElementById('log-cells-filled').innerText = formatNum(sum.cells_filled != null ? sum.cells_filled : sum.fixed_cells);
+            document.getElementById('log-dups-removed').innerText = formatNum(sum.duplicates_removed != null ? sum.duplicates_removed : sum.removed_duplicates);
+            document.getElementById('log-outliers-treated').innerText = formatNum(sum.outliers_treated || 0);
+
+            const fmtStat = (v) => (v === '-' || v === undefined || v === null || isNaN(v)) ? '-' : formatNum(v);
 
             const statsTbody = document.getElementById('step3-stats-tbody');
             if (statsTbody) {
                 statsTbody.innerHTML = (step3.stats_comparison || []).map(s => `
                     <tr>
-                        <td><strong>${s.column}</strong></td>
+                        <td><strong>${escapeHtml(s.column)}</strong></td>
                         <td>${formatNum(s.count_before)} ➔ <strong>${formatNum(s.count_after)}</strong></td>
-                        <td>${formatNum(s.mean_before)} ➔ <strong style="color:#059669;">${formatNum(s.mean_after)}</strong></td>
-                        <td>${formatNum(s.median_before)} ➔ <strong style="color:#059669;">${formatNum(s.median_after)}</strong></td>
-                        <td>${formatNum(s.min_before)} ➔ <strong style="color:#059669;">${formatNum(s.min_after)}</strong></td>
-                        <td>${formatNum(s.max_before)} ➔ <strong style="color:#059669;">${formatNum(s.max_after)}</strong></td>
-                        <td>${formatNum(s.std_before)} ➔ <strong style="color:#059669;">${formatNum(s.std_after)}</strong></td>
+                        <td>${fmtStat(s.mean_before)} ➔ <strong style="color:#059669;">${fmtStat(s.mean_after)}</strong></td>
+                        <td>${fmtStat(s.median_before)} ➔ <strong style="color:#059669;">${fmtStat(s.median_after)}</strong></td>
+                        <td>${fmtStat(s.min_before)} ➔ <strong style="color:#059669;">${fmtStat(s.min_after)}</strong></td>
+                        <td>${fmtStat(s.max_before)} ➔ <strong style="color:#059669;">${fmtStat(s.max_after)}</strong></td>
+                        <td>${fmtStat(s.std_before)} ➔ <strong style="color:#059669;">${fmtStat(s.std_after)}</strong></td>
                     </tr>
                 `).join('');
             }
 
-            const cols = step3.preview_columns || [];
-            document.getElementById('step3-clean-thead').innerHTML = `<tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr>`;
-            document.getElementById('step3-clean-tbody').innerHTML = (step3.preview_rows || []).map(r => `
-                <tr>${cols.map(c => `<td>${r[c] !== undefined && r[c] !== null ? r[c] : ''}</td>`).join('')}</tr>
-            `).join('');
+            const rows = step3.preview_rows || step3.preview_cleaned_rows || [];
+            const cols = (step3.preview_columns && step3.preview_columns.length > 0)
+                ? step3.preview_columns
+                : ((step3.columns && step3.columns.length > 0)
+                    ? step3.columns
+                    : (rows[0] ? Object.keys(rows[0]) : (pipelineData?.step2?.columns || [])));
+
+            const theadEl = document.getElementById('step3-clean-thead');
+            if (theadEl) theadEl.innerHTML = `<tr>${cols.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr>`;
+
+            const tbodyEl = document.getElementById('step3-clean-tbody');
+            if (tbodyEl) {
+                if (rows.length === 0) {
+                    tbodyEl.innerHTML = `<tr><td colspan="${Math.max(1, cols.length)}" style="text-align:center; padding:25px; color:#64748b;">Chưa có dữ liệu làm sạch. Bấm 'Áp dụng làm sạch tự động' để tạo bản xem trước.</td></tr>`;
+                } else {
+                    tbodyEl.innerHTML = rows.map(r => `
+                        <tr>${cols.map(c => `<td>${r[c] !== undefined && r[c] !== null ? escapeHtml(r[c]) : ''}</td>`).join('')}</tr>
+                    `).join('');
+                }
+            }
         }
 
         async function applyCleaning(isAuto) {
@@ -3096,16 +3493,32 @@
                 filters[s.getAttribute('data-col')] = s.value;
             });
 
-            const res = await fetch('/api/step5-filter', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ filters })
-            });
-            const result = await res.json();
-            if (result.status === 'success') {
-                pipelineData = result.data;
-                renderStep5(pipelineData.step5);
-                scheduleChartRender();
+            try {
+                const res = await fetch('/api/step5-filter', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ filters })
+                });
+                if (!res.ok) throw new Error("HTTP " + res.status);
+                const result = await res.json();
+                if (result.status === 'success' && result.data && result.data.step5) {
+                    pipelineData = result.data;
+                    renderStep5(pipelineData.step5);
+                    scheduleChartRender();
+                    return;
+                }
+            } catch (err) {
+                console.warn("Backend API offline, filtering client-side:", err);
+                const baseRows = (pipelineData.cleaned_rows || pipelineData.raw_rows) || [];
+                const filteredRows = baseRows.filter(r => {
+                    for (const [col, val] of Object.entries(filters)) {
+                        if (val && val !== 'ALL' && String(r[col] || '').trim() !== val) {
+                            return false;
+                        }
+                    }
+                    return true;
+                });
+                clientEngineStep4Dashboard(filteredRows);
             }
         }
 
@@ -3188,85 +3601,101 @@
             }
 
             tbody.innerHTML = items.map(s => {
-                const q = String(s.quadrant || '');
+                const q = String(s.quadrant || '🌟 Ngôi sao tăng trưởng');
                 const qClass = (q.includes('Ngôi sao') || q === 'Star') ? 'star' :
                     ((q.includes('Bò sữa') || q === 'Cash Cow') ? 'cow' :
                     ((q.includes('Bẫy') || q === 'Volume Trap') ? 'trap' : 'burner'));
-                const a = String(s.alert || '');
-                const aClass = (a.includes('Nguy hiểm') || a === 'RED') ? 'red-alert' :
-                    ((a.includes('Cảnh báo') || a === 'YELLOW') ? 'yellow-alert' : 'green-alert');
+                const a = String(s.alert || '🟢 Tối ưu');
+                const aClass = (a.includes('Nguy hiểm') || a === 'RED' || a.includes('🔴')) ? 'red-alert' :
+                    ((a.includes('Cảnh báo') || a === 'YELLOW' || a.includes('🟡')) ? 'yellow-alert' : 'green-alert');
+
+                const rev = s.revenue != null ? s.revenue : 0;
+                const netRev = s.net_realized_revenue != null ? s.net_realized_revenue : rev;
+                const ord = s.orders != null ? s.orders : 0;
+                const retOrd = s.returned_orders != null ? s.returned_orders : 0;
+                const retRate = s.return_rate != null ? s.return_rate : 0;
+                const traf = s.traffic != null ? s.traffic : 0;
+                const cr = s.cr_percent != null ? s.cr_percent : 0;
+                const aov = s.aov != null ? s.aov : (ord > 0 ? Math.round(rev / ord) : 0);
+                const spend = s.ad_spend != null ? s.ad_spend : 0;
+                const cogs = s.cogs != null ? s.cogs : Math.round(rev * 0.4);
+                const cpa = s.cpa != null ? s.cpa : (ord > 0 ? Math.round(spend / ord) : 0);
+                const cir = s.cir_percent != null ? s.cir_percent : (rev > 0 ? +((spend / rev) * 100).toFixed(1) : 0);
+                const netP = s.net_profit != null ? s.net_profit : (netRev - spend - cogs);
+                const margin = s.net_margin_percent != null ? s.net_margin_percent : (rev > 0 ? +((netP / rev) * 100).toFixed(1) : 0);
+                const roas = s.roas != null ? s.roas : (spend > 0 ? +(rev / spend).toFixed(2) : 3.0);
 
                 if (sc === 'A') {
                     return `
                         <tr>
                             <td><strong>${escapeHtml(s.name)}</strong></td>
-                            <td><span class="badge ${qClass}">${s.quadrant}</span></td>
-                            <td><span class="badge ${aClass}">${s.alert}</span></td>
-                            <td class="num-col">${formatMoney(s.revenue)}</td>
-                            <td class="num-col" style="color:#059669; font-weight:700;">${formatMoney(s.net_realized_revenue)}</td>
-                            <td class="num-col">${formatNum(s.orders)}</td>
-                            <td class="num-col" style="${s.returned_orders > 0 ? 'color:#dc2626;' : ''}">${formatNum(s.returned_orders)}</td>
-                            <td class="num-col" style="${s.return_rate > 15 ? 'color:#dc2626; font-weight:700;' : ''}">${s.return_rate}%</td>
-                            <td class="num-col">${formatNum(s.traffic)}</td>
-                            <td class="num-col">${s.cr_percent}%</td>
-                            <td class="num-col">${formatMoney(s.aov)}</td>
-                            <td class="num-col">${formatMoney(s.ad_spend)}</td>
-                            <td class="num-col">${formatMoney(s.cogs)}</td>
-                            <td class="num-col">${formatMoney(s.cpa)}</td>
-                            <td class="num-col">${s.cir_percent}%</td>
-                            <td class="num-col" style="${s.net_profit < 0 ? 'color:#dc2626; font-weight:700;' : 'color:#059669; font-weight:700;'}">${formatMoney(s.net_profit)}</td>
-                            <td class="num-col">${s.net_margin_percent}%</td>
-                            <td class="num-col"><strong style="color:#0284c7;">${s.roas}x</strong></td>
+                            <td><span class="badge ${qClass}">${escapeHtml(q)}</span></td>
+                            <td><span class="badge ${aClass}">${escapeHtml(a)}</span></td>
+                            <td class="num-col">${formatMoney(rev)}</td>
+                            <td class="num-col" style="color:#059669; font-weight:700;">${formatMoney(netRev)}</td>
+                            <td class="num-col">${formatNum(ord)}</td>
+                            <td class="num-col" style="${retOrd > 0 ? 'color:#dc2626;' : ''}">${formatNum(retOrd)}</td>
+                            <td class="num-col" style="${retRate > 15 ? 'color:#dc2626; font-weight:700;' : ''}">${retRate}%</td>
+                            <td class="num-col">${formatNum(traf)}</td>
+                            <td class="num-col">${cr}%</td>
+                            <td class="num-col">${formatMoney(aov)}</td>
+                            <td class="num-col">${formatMoney(spend)}</td>
+                            <td class="num-col">${formatMoney(cogs)}</td>
+                            <td class="num-col">${formatMoney(cpa)}</td>
+                            <td class="num-col">${cir}%</td>
+                            <td class="num-col" style="${netP < 0 ? 'color:#dc2626; font-weight:700;' : 'color:#059669; font-weight:700;'}">${formatMoney(netP)}</td>
+                            <td class="num-col">${margin}%</td>
+                            <td class="num-col"><strong style="color:#0284c7;">${roas}x</strong></td>
                         </tr>
                     `;
                 } else if (sc === 'B') {
                     return `
                         <tr>
                             <td><strong>${escapeHtml(s.name)}</strong></td>
-                            <td><span class="badge ${qClass}">${s.quadrant}</span></td>
-                            <td><span class="badge ${aClass}">${s.alert}</span></td>
-                            <td class="num-col">${formatMoney(s.revenue)}</td>
-                            <td class="num-col" style="color:#059669; font-weight:700;">${formatMoney(s.net_realized_revenue || s.revenue)}</td>
-                            <td class="num-col">${formatNum(s.orders)}</td>
-                            <td class="num-col">${formatMoney(s.aov)}</td>
-                            <td class="num-col">${formatMoney(s.cogs || s.ad_spend)}</td>
-                            <td class="num-col" style="${s.net_profit < 0 ? 'color:#dc2626; font-weight:700;' : 'color:#059669; font-weight:700;'}">${formatMoney(s.net_profit)}</td>
-                            <td class="num-col">${s.net_margin_percent}%</td>
+                            <td><span class="badge ${qClass}">${escapeHtml(q)}</span></td>
+                            <td><span class="badge ${aClass}">${escapeHtml(a)}</span></td>
+                            <td class="num-col">${formatMoney(rev)}</td>
+                            <td class="num-col" style="color:#059669; font-weight:700;">${formatMoney(netRev)}</td>
+                            <td class="num-col">${formatNum(ord)}</td>
+                            <td class="num-col">${formatMoney(aov)}</td>
+                            <td class="num-col">${formatMoney(cogs || spend)}</td>
+                            <td class="num-col" style="${netP < 0 ? 'color:#dc2626; font-weight:700;' : 'color:#059669; font-weight:700;'}">${formatMoney(netP)}</td>
+                            <td class="num-col">${margin}%</td>
                         </tr>
                     `;
                 } else {
-                    const avgVal = s.orders > 0 ? Math.round(s.revenue / s.orders) : 0;
                     return `
                         <tr>
                             <td><strong>${escapeHtml(s.name)}</strong></td>
-                            <td><span class="badge ${qClass}">${s.quadrant}</span></td>
-                            <td><span class="badge ${aClass}">${s.alert}</span></td>
-                            <td class="num-col">${formatMoney(s.revenue)}</td>
-                            <td class="num-col">${formatNum(s.orders)}</td>
-                            <td class="num-col">${formatMoney(avgVal || s.aov)}</td>
-                            <td class="num-col" style="color:#059669; font-weight:700;">${formatMoney(s.net_profit || s.revenue)}</td>
+                            <td><span class="badge ${qClass}">${escapeHtml(q)}</span></td>
+                            <td><span class="badge ${aClass}">${escapeHtml(a)}</span></td>
+                            <td class="num-col">${formatMoney(rev)}</td>
+                            <td class="num-col">${formatNum(ord)}</td>
+                            <td class="num-col">${formatMoney(aov)}</td>
+                            <td class="num-col" style="color:#059669; font-weight:700;">${formatMoney(netP)}</td>
                         </tr>
                     `;
                 }
             }).join('');
         }
 
-        function filterScorecard() {
+        function filterScorecardTable() {
             if (!pipelineData || !pipelineData.step5) return;
-            const dim = document.getElementById('scorecard-dim-switcher').value;
-            const allItems = ((pipelineData.step5.scorecards_by_dim || {})[dim]) || pipelineData.step5.scorecard || [];
-            const query = (document.getElementById('scorecard-search').value || '').toLowerCase().trim();
-            const quad = document.getElementById('scorecard-quad-filter').value;
-            const alertFilter = document.getElementById('scorecard-alert-filter').value;
+            const dim = document.getElementById('scorecard-dim-switcher')?.value;
+            const fullList = (dim && (pipelineData.step5.scorecards_by_dim || {})[dim]) || pipelineData.step5.scorecard || [];
+            const q = (document.getElementById('scorecard-search')?.value || '').toLowerCase().trim();
+            const quadFilter = document.getElementById('scorecard-quad-filter')?.value || 'ALL';
+            const alertFilter = document.getElementById('scorecard-alert-filter')?.value || 'ALL';
 
-            const filtered = allItems.filter(item => {
-                const matchQ = (query === '' || String(item.name || '').toLowerCase().includes(query));
-                const itemQuad = String(item.quadrant || '');
-                const matchQuad = (quad === 'ALL' || itemQuad === quad ||
-                    (quad.includes('Ngôi sao') && itemQuad.includes('Ngôi sao')) ||
-                    (quad.includes('Bò sữa') && itemQuad.includes('Bò sữa')) ||
-                    (quad.includes('Bẫy') && itemQuad.includes('Bẫy')) ||
-                    (quad.includes('Đốt tiền') && itemQuad.includes('Đốt tiền')));
+            const filtered = fullList.filter(item => {
+                const matchQ = !q || String(item.name || '').toLowerCase().includes(q);
+                const itemQ = String(item.quadrant || '');
+                const matchQuad = (quadFilter === 'ALL' || itemQ === quadFilter ||
+                    (quadFilter.includes('Ngôi sao') && (itemQ.includes('Ngôi sao') || itemQ === 'Star')) ||
+                    (quadFilter.includes('Bò sữa') && (itemQ.includes('Bò sữa') || itemQ === 'Cash Cow')) ||
+                    (quadFilter.includes('Bẫy') && (itemQ.includes('Bẫy') || itemQ === 'Volume Trap')) ||
+                    (quadFilter.includes('Đốt') && (itemQ.includes('Đốt') || itemQ === 'Cash Burner')));
+
                 const itemAlert = String(item.alert || '');
                 const matchAlert = (alertFilter === 'ALL' || itemAlert === alertFilter ||
                     (alertFilter.includes('Tối ưu') && itemAlert.includes('Tối ưu')) ||
@@ -3277,19 +3706,90 @@
             renderScorecardTable(filtered, pipelineData?.step5?.scenario || 'A');
         }
 
-        async function applyCustomCrossPivot() {
-            const rowDim = document.getElementById('pivot-row-select').value;
-            const colDim = document.getElementById('pivot-col-select').value;
-            const res = await fetch('/api/step5-filter', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ pivot: { row_dim: rowDim, col_dim: colDim } })
+        function computeClientCrossPivot(rowDim, colDim) {
+            const rows = (pipelineData && (pipelineData.cleaned_rows || pipelineData.raw_rows)) || [];
+            if (rows.length === 0 || !rowDim || !colDim) return;
+            const parseNum = (v) => {
+                if (typeof v === 'number') return isNaN(v) ? 0 : v;
+                if (!v) return 0;
+                const clean = String(v).replace(/[^0-9.-]/g, '');
+                const n = parseFloat(clean);
+                return isNaN(n) ? 0 : n;
+            };
+            const cols = Object.keys(rows[0]);
+            const revCol = cols.find(c => /doanh\s*thu|revenue|sales|gmv|thành\s*tiền|tiền\s*bán/i.test(c)) || cols[0];
+            const costCol = cols.find(c => /chi\s*phí\s*ads|chi\s*phí|ad_spend|spend|ads|quảng\s*cáo/i.test(c));
+            const profitCol = cols.find(c => /lợi\s*nhuận|profit|lãi/i.test(c));
+            const ordCol = cols.find(c => /số\s*lượng|đơn\s*hàng|orders|quantity/i.test(c));
+            const retCol = cols.find(c => /hoàn|return|hủy/i.test(c));
+
+            const pMap = {};
+            rows.forEach(r => {
+                const rVal = String(r[rowDim] || 'Chưa phân loại').trim();
+                const cVal = String(r[colDim] || 'Chưa phân loại').trim();
+                const key = rVal + '____' + cVal;
+                if (!pMap[key]) pMap[key] = { row_dim: rVal, col_dim: cVal, rev: 0, cost: 0, profit: 0, orders: 0, ret: 0 };
+                const rev = parseNum(r[revCol]);
+                const cost = costCol ? parseNum(r[costCol]) : Math.round(rev * 0.22);
+                const profit = profitCol ? parseNum(r[profitCol]) : (rev - cost);
+                const ord = ordCol ? (parseNum(r[ordCol]) || 1) : 1;
+                const ret = retCol ? parseNum(r[retCol]) : 0;
+                pMap[key].rev += rev;
+                pMap[key].cost += cost;
+                pMap[key].profit += profit;
+                pMap[key].orders += ord;
+                pMap[key].ret += ret;
             });
-            const result = await res.json();
-            if (result.status === 'success') {
-                pipelineData = result.data;
-                renderPivots(pipelineData.step5);
-                switchPivotTab(1);
+
+            const list = Object.values(pMap).sort((a, b) => b.rev - a.rev).slice(0, 30).map(p => {
+                const retRate = p.orders > 0 ? +((p.ret / p.orders) * 100).toFixed(1) : 0;
+                const roas = p.cost > 0 ? +(p.rev / p.cost).toFixed(2) : 3.0;
+                const margin = p.rev > 0 ? +((p.profit / p.rev) * 100).toFixed(1) : 0;
+                const netRev = Math.max(0, Math.round(p.rev * (1 - (retRate / 100))));
+                let alert = 'GREEN';
+                if (retRate > 15 || p.profit < 0) alert = 'RED';
+                else if (retRate >= 8 || margin < 10) alert = 'YELLOW';
+                return {
+                    row_dim: p.row_dim,
+                    col_dim: p.col_dim,
+                    revenue: Math.round(p.rev),
+                    net_revenue: netRev,
+                    orders: Math.round(p.orders),
+                    return_rate: retRate,
+                    ad_spend: Math.round(p.cost),
+                    net_profit: Math.round(p.profit),
+                    net_margin: margin,
+                    roas: roas,
+                    alert: alert
+                };
+            });
+            if (!pipelineData.step5) pipelineData.step5 = {};
+            pipelineData.step5.pivot_camp_chan = list;
+            renderPivots(pipelineData.step5);
+            switchPivotTab(1);
+        }
+
+        async function applyCustomCrossPivot() {
+            const rowDim = document.getElementById('pivot-row-select')?.value;
+            const colDim = document.getElementById('pivot-col-select')?.value;
+            if (!rowDim || !colDim) return;
+            try {
+                const res = await fetch('/api/step5-filter', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ pivot: { row_dim: rowDim, col_dim: colDim } })
+                });
+                if (!res.ok) throw new Error("HTTP " + res.status);
+                const result = await res.json();
+                if (result.status === 'success' && result.data && result.data.step5) {
+                    pipelineData = result.data;
+                    renderPivots(pipelineData.step5);
+                    switchPivotTab(1);
+                    return;
+                }
+            } catch (err) {
+                console.warn("Backend API offline, computing custom cross-pivot client-side:", err);
+                computeClientCrossPivot(rowDim, colDim);
             }
         }
 
@@ -3305,63 +3805,80 @@
         function renderPivots(step5) {
             const t1 = document.getElementById('p-tbody-1');
             if (t1) {
-                t1.innerHTML = (step5.pivot_camp_chan || []).map(r => {
-                    const strA = String(r.alert || '');
-                    const aClass = (strA.includes('Nguy hiểm') || r.alert === 'RED') ? 'red-alert' :
-                        ((strA.includes('Cảnh báo') || r.alert === 'YELLOW') ? 'yellow-alert' : 'green-alert');
-                    return `
-                        <tr>
-                            <td><strong>${r.row_dim}</strong></td>
-                            <td><span class="badge cow">${r.col_dim}</span></td>
-                            <td>${formatNum(r.revenue)}</td>
-                            <td>${formatNum(r.net_revenue)}</td>
-                            <td>${formatNum(r.orders)}</td>
-                            <td style="${r.return_rate > 15 ? 'color:#dc2626; font-weight:700;' : ''}">${r.return_rate}%</td>
-                            <td>${formatNum(r.ad_spend)}</td>
-                            <td style="${r.net_profit < 0 ? 'color:#dc2626; font-weight:700;' : 'color:#059669; font-weight:700;'}">${formatNum(r.net_profit)}</td>
-                            <td>${r.net_margin}%</td>
-                            <td><strong>${r.roas}x</strong></td>
-                            <td><span class="badge ${aClass}">${r.alert}</span></td>
-                        </tr>
-                    `;
-                }).join('');
+                const list1 = step5.pivot_camp_chan || [];
+                if (list1.length === 0) {
+                    t1.innerHTML = '<tr><td colspan="11" style="text-align:center; padding:25px; color:#64748b;">Chưa có dữ liệu Bảng Chéo 1. Vui lòng chọn chiều phân tích và bấm "Tạo Pivot Chéo".</td></tr>';
+                } else {
+                    t1.innerHTML = list1.map(r => {
+                        const strA = String(r.alert || 'GREEN');
+                        const aClass = (strA.includes('Nguy hiểm') || strA === 'RED' || strA.includes('🔴')) ? 'red-alert' :
+                            ((strA.includes('Cảnh báo') || strA === 'YELLOW' || strA.includes('🟡')) ? 'yellow-alert' : 'green-alert');
+                        const aText = strA.includes('RED') ? '🔴 Nguy hiểm' : (strA.includes('YELLOW') ? '🟡 Cảnh báo' : '🟢 Tối ưu');
+                        return `
+                            <tr>
+                                <td><strong>${escapeHtml(r.row_dim)}</strong></td>
+                                <td><span class="badge cow">${escapeHtml(r.col_dim)}</span></td>
+                                <td class="num-col">${formatMoney(r.revenue)}</td>
+                                <td class="num-col" style="color:#059669; font-weight:700;">${formatMoney(r.net_revenue != null ? r.net_revenue : r.revenue)}</td>
+                                <td class="num-col">${formatNum(r.orders)}</td>
+                                <td class="num-col" style="${r.return_rate > 15 ? 'color:#dc2626; font-weight:700;' : ''}">${r.return_rate || 0}%</td>
+                                <td class="num-col">${formatMoney(r.ad_spend || 0)}</td>
+                                <td class="num-col" style="${r.net_profit < 0 ? 'color:#dc2626; font-weight:700;' : 'color:#059669; font-weight:700;'}">${formatMoney(r.net_profit || 0)}</td>
+                                <td class="num-col">${r.net_margin || 0}%</td>
+                                <td class="num-col"><strong>${r.roas || 0}x</strong></td>
+                                <td><span class="badge ${aClass}">${aText}</span></td>
+                            </tr>
+                        `;
+                    }).join('');
+                }
             }
 
             const t2 = document.getElementById('p-tbody-2');
             if (t2) {
-                t2.innerHTML = (step5.pivot_cat_reg || []).map(r => {
-                    const strA = String(r.alert || '');
-                    const aClass = (strA.includes('Nguy hiểm') || r.alert === 'RED') ? 'red-alert' :
-                        ((strA.includes('Cảnh báo') || r.alert === 'YELLOW') ? 'yellow-alert' : 'green-alert');
-                    return `
-                        <tr>
-                            <td><strong>${r.row_dim}</strong></td>
-                            <td><span class="badge star">${r.col_dim}</span></td>
-                            <td>${formatNum(r.revenue)}</td>
-                            <td>${formatNum(r.net_revenue)}</td>
-                            <td>${formatNum(r.orders)}</td>
-                            <td>${r.return_rate}%</td>
-                            <td>${formatNum(r.net_profit)}</td>
-                            <td>${r.net_margin}%</td>
-                            <td><span class="badge ${aClass}">${r.alert}</span></td>
-                        </tr>
-                    `;
-                }).join('');
+                const list2 = step5.pivot_cat_reg || [];
+                if (list2.length === 0) {
+                    t2.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:25px; color:#64748b;">Chưa có dữ liệu Bảng Chéo 2.</td></tr>';
+                } else {
+                    t2.innerHTML = list2.map(r => {
+                        const strA = String(r.alert || 'GREEN');
+                        const aClass = (strA.includes('Nguy hiểm') || strA === 'RED' || strA.includes('🔴')) ? 'red-alert' :
+                            ((strA.includes('Cảnh báo') || strA === 'YELLOW' || strA.includes('🟡')) ? 'yellow-alert' : 'green-alert');
+                        const aText = strA.includes('RED') ? '🔴 Nguy hiểm' : (strA.includes('YELLOW') ? '🟡 Cảnh báo' : '🟢 Tối ưu');
+                        return `
+                            <tr>
+                                <td><strong>${escapeHtml(r.row_dim)}</strong></td>
+                                <td><span class="badge star">${escapeHtml(r.col_dim)}</span></td>
+                                <td class="num-col">${formatMoney(r.revenue)}</td>
+                                <td class="num-col" style="color:#059669; font-weight:700;">${formatMoney(r.net_revenue != null ? r.net_revenue : r.revenue)}</td>
+                                <td class="num-col">${formatNum(r.orders)}</td>
+                                <td class="num-col">${r.return_rate || 0}%</td>
+                                <td class="num-col" style="${r.net_profit < 0 ? 'color:#dc2626; font-weight:700;' : 'color:#059669; font-weight:700;'}">${formatMoney(r.net_profit || 0)}</td>
+                                <td class="num-col">${r.net_margin || 0}%</td>
+                                <td><span class="badge ${aClass}">${aText}</span></td>
+                            </tr>
+                        `;
+                    }).join('');
+                }
             }
 
             const t3 = document.getElementById('p-tbody-3');
             if (t3) {
-                t3.innerHTML = (step5.daily_activity_log || []).map(r => `
-                    <tr>
-                        <td><strong>${r.date}</strong></td>
-                        <td>${formatNum(r.revenue)}</td>
-                        <td>${formatNum(r.orders)}</td>
-                        <td>${formatNum(r.spend)}</td>
-                        <td style="${r.net_profit < 0 ? 'color:#dc2626; font-weight:700;' : 'color:#059669; font-weight:700;'}">${formatNum(r.net_profit)}</td>
-                        <td>${r.cir}%</td>
-                        <td><span class="badge ${r.anomaly.includes('Cảnh báo') ? 'red-alert' : 'green-alert'}">${r.anomaly}</span></td>
-                    </tr>
-                `).join('');
+                const list3 = step5.daily_activity_log || [];
+                if (list3.length === 0) {
+                    t3.innerHTML = '<tr><td colspan="7" style="text-align:center; padding:25px; color:#64748b;">Chưa có dữ liệu biến động theo thời gian.</td></tr>';
+                } else {
+                    t3.innerHTML = list3.map(r => `
+                        <tr>
+                            <td><strong>${escapeHtml(r.date)}</strong></td>
+                            <td class="num-col">${formatMoney(r.revenue)}</td>
+                            <td class="num-col">${formatNum(r.orders)}</td>
+                            <td class="num-col">${formatMoney(r.spend || 0)}</td>
+                            <td class="num-col" style="${r.net_profit < 0 ? 'color:#dc2626; font-weight:700;' : 'color:#059669; font-weight:700;'}">${formatMoney(r.net_profit || 0)}</td>
+                            <td class="num-col">${r.cir || 0}%</td>
+                            <td><span class="badge ${String(r.anomaly || '').includes('Cảnh báo') ? 'red-alert' : 'green-alert'}">${escapeHtml(r.anomaly || 'Ổn định')}</span></td>
+                        </tr>
+                    `).join('');
+                }
             }
         }
 
@@ -3539,11 +4056,28 @@
         }
 
         function exportCleanData(fmt) {
-            if (!pipelineData || !pipelineData.step3 || !pipelineData.step3.has_cleaned) {
+            const rows = (pipelineData && (pipelineData.cleaned_rows || pipelineData.raw_rows)) || [];
+            if (rows.length === 0) {
                 alert("⚠️ Chưa có dữ liệu sạch để xuất. Vui lòng hoàn thành Bước 2 (Nhập dữ liệu) và Bước 3 (Làm sạch dữ liệu) trước!");
                 return;
             }
-            window.location.href = `/api/export-clean?format=${fmt || 'csv'}`;
+            if (fmt === 'xlsx' && typeof XLSX !== 'undefined') {
+                const ws = XLSX.utils.json_to_sheet(rows);
+                const wb = XLSX.utils.book_new();
+                XLSX.utils.book_append_sheet(wb, ws, "Cleaned_Data");
+                XLSX.writeFile(wb, "du_lieu_sach_bi.xlsx");
+            } else if (typeof Papa !== 'undefined') {
+                const csv = Papa.unparse(rows);
+                const blob = new Blob(["\uFEFF" + csv], { type: 'text/csv;charset=utf-8;' });
+                const link = document.createElement("a");
+                link.href = URL.createObjectURL(blob);
+                link.setAttribute("download", "du_lieu_sach_bi.csv");
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            } else {
+                window.location.href = `/api/export-clean?format=${fmt || 'csv'}`;
+            }
         }
 
         async function exportReportDocx() {
