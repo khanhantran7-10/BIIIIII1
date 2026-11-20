@@ -1824,26 +1824,44 @@
 
             const colProfiles = cols.map(c => {
                 let numCount = 0;
+                let dateCount = 0;
                 let sum = 0;
                 let nulls = 0;
                 cleanRows.forEach(r => {
                     const v = r[c];
                     if (v === null || v === "" || v === undefined) nulls++;
                     else {
-                        const n = parseFloat(String(v).replace(/[,đ\s]/g, ''));
-                        if (!isNaN(n)) { numCount++; sum += n; }
+                        const s = String(v).trim();
+                        const n = parseFloat(s.replace(/[,đ\s]/g, ''));
+                        if (!isNaN(n) && !/^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(s)) { numCount++; sum += n; }
+                        else if (!isNaN(Date.parse(s)) || /^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}/.test(s) || /^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(s)) {
+                            dateCount++;
+                        }
                     }
                 });
-                const isNum = numCount > cleanRows.length * 0.5;
+                const isNum = numCount > cleanRows.length * 0.4;
+                const isDate = !isNum && dateCount > cleanRows.length * 0.4;
+                const typeStr = isNum ? 'Số (Metric)' : (isDate ? 'Thời gian (Date)' : 'Phân loại (Dim)');
+                const dataTypeStr = isNum ? 'numeric' : (isDate ? 'date' : 'text');
                 return {
+                    column: c,
                     column_name: c,
-                    data_type: isNum ? 'numeric' : 'text',
+                    type: typeStr,
+                    data_type: dataTypeStr,
                     missing_count: nulls,
                     missing_rate: ((nulls / cleanRows.length) * 100).toFixed(1) + '%',
+                    missing_pct: ((nulls / cleanRows.length) * 100).toFixed(1),
+                    format_errors: 0,
+                    anomalies: 0,
                     mean: isNum && numCount > 0 ? (sum / numCount).toFixed(1) : '-',
-                    status: nulls > 0 ? 'Cần làm sạch' : 'Tốt'
+                    status: nulls > 0 ? 'Cần làm sạch' : 'Tốt',
+                    samples: cleanRows.slice(0, 3).map(r => String(r[c] != null ? r[c] : '')).filter(Boolean)
                 };
             });
+
+            const totalCells = Math.max(1, rows.length * cols.length);
+            const healthScore = Math.max(15, Math.min(100, Math.round(100 - (missingCells / totalCells * 60) - (duplicateRows / Math.max(1, rows.length) * 30))));
+            const healthStatus = healthScore >= 85 ? 'Dữ liệu xuất sắc (Sạch)' : (healthScore >= 60 ? 'Chất lượng trung bình' : 'Chất lượng kém, cần làm sạch');
 
             if (!pipelineData) pipelineData = {};
             pipelineData.raw_rows = rows;
@@ -1853,15 +1871,19 @@
                 total_rows: rows.length,
                 total_cols: cols.length,
                 columns: cols,
+                preview_columns: cols,
                 file_info: { filename: filename, row_count: rows.length, col_count: cols.length },
                 health_summary: {
                     total_missing_cells: missingCells,
                     duplicate_rows: duplicateRows,
                     format_errors: 0,
-                    logic_anomalies: 0
+                    logic_anomalies: 0,
+                    health_score: healthScore,
+                    health_status: healthStatus
                 },
                 column_profiles: colProfiles,
-                preview_rows: cleanRows.slice(0, 10)
+                columns_profiling: colProfiles,
+                preview_rows: cleanRows.slice(0, 15)
             };
             pipelineData.current_unlocked_step = Math.max(pipelineData.current_unlocked_step || 1, 3);
             unlockedStep = pipelineData.current_unlocked_step;
@@ -2301,19 +2323,83 @@
             const ext = fname.substring(fname.lastIndexOf('.'));
 
             if (ext === '.csv') {
-                Papa.parse(file, {
-                    header: true,
-                    skipEmptyLines: true,
-                    complete: (results) => uploadDataRows(file.name, results.data)
-                });
+                if (typeof Papa !== 'undefined') {
+                    Papa.parse(file, {
+                        header: true,
+                        skipEmptyLines: true,
+                        complete: (results) => {
+                            if (results.data && results.data.length > 0) {
+                                uploadDataRows(file.name, results.data);
+                            } else {
+                                alert("File CSV không có dữ liệu hợp lệ.");
+                            }
+                        },
+                        error: (err) => {
+                            alert("Lỗi đọc file CSV: " + err.message);
+                        }
+                    });
+                } else {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        const lines = e.target.result.split(/\r?\n/).filter(l => l.trim().length > 0);
+                        if (lines.length < 2) { alert("File CSV không có dòng dữ liệu."); return; }
+                        const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
+                        const rows = lines.slice(1).map(l => {
+                            const vals = l.split(',').map(v => v.trim().replace(/^"|"$/g, ''));
+                            const obj = {};
+                            headers.forEach((h, idx) => obj[h] = vals[idx] !== undefined ? vals[idx] : "");
+                            return obj;
+                        });
+                        uploadDataRows(file.name, rows);
+                    };
+                    reader.readAsText(file, 'utf-8');
+                }
             } else if (ext === '.xlsx' || ext === '.xls') {
+                if (typeof XLSX === 'undefined') {
+                    alert("Thư viện đọc Excel (SheetJS) chưa sẵn sàng. Vui lòng kiểm tra kết nối mạng hoặc thử lại với file .csv.");
+                    return;
+                }
                 const reader = new FileReader();
                 reader.onload = (e) => {
-                    const data = new Uint8Array(e.target.result);
-                    const workbook = XLSX.read(data, { type: 'array' });
-                    const firstSheet = workbook.SheetNames[0];
-                    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheet], { defval: "" });
-                    uploadDataRows(file.name, rows);
+                    try {
+                        const data = new Uint8Array(e.target.result);
+                        const workbook = XLSX.read(data, { type: 'array', cellDates: true });
+                        if (!workbook || !workbook.SheetNames || workbook.SheetNames.length === 0) {
+                            alert("File Excel không có sheet dữ liệu nào.");
+                            return;
+                        }
+                        
+                        // Quản lý đa sheet
+                        const sheetSelect = document.getElementById('step2-bar-sheet-select');
+                        const sheetWrap = document.getElementById('step2-bar-sheet-wrap');
+                        if (sheetSelect && workbook.SheetNames.length > 1) {
+                            sheetSelect.innerHTML = workbook.SheetNames.map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+                            if (sheetWrap) sheetWrap.style.display = 'inline-flex';
+                            sheetSelect.onchange = () => {
+                                const sName = sheetSelect.value;
+                                const sheetRows = XLSX.utils.sheet_to_json(workbook.Sheets[sName], { defval: "" });
+                                uploadDataRows(file.name + ` (${sName})`, sheetRows);
+                            };
+                        } else if (sheetWrap) {
+                            sheetWrap.style.display = 'none';
+                        }
+
+                        const firstSheet = workbook.SheetNames[0];
+                        const worksheet = workbook.Sheets[firstSheet];
+                        const rows = XLSX.utils.sheet_to_json(worksheet, { defval: "" });
+                        if (!rows || rows.length === 0) {
+                            alert("Sheet đầu tiên trong file Excel không có dòng dữ liệu nào.");
+                            return;
+                        }
+                        uploadDataRows(file.name, rows);
+                    } catch (err) {
+                        console.error("Lỗi phân tích file Excel:", err);
+                        alert("Lỗi khi đọc file Excel: " + err.message);
+                    }
+                };
+                reader.onerror = (err) => {
+                    console.error("Lỗi FileReader:", err);
+                    alert("Không thể đọc tệp từ thiết bị.");
                 };
                 reader.readAsArrayBuffer(file);
             } else if (ext === '.json') {
@@ -2324,7 +2410,7 @@
                         const rows = Array.isArray(parsed) ? parsed : (parsed.data || parsed.rows || [parsed]);
                         uploadDataRows(file.name, rows);
                     } catch (err) {
-                        alert("File JSON không hợp lệ.");
+                        alert("File JSON không hợp lệ: " + err.message);
                     }
                 };
                 reader.readAsText(file);
@@ -2332,6 +2418,8 @@
                 alert("Vui lòng chọn file định dạng .xlsx, .xls, .csv hoặc .json");
             }
         }
+
+
 
         async function uploadDataRows(filename, rows) {
             if (!rows || rows.length === 0) {
@@ -2409,60 +2497,75 @@
             document.getElementById('h-total-cols').innerText = formatNum(step2.total_cols);
             document.getElementById('h-missing-cells').innerText = formatNum(h.total_missing_cells);
             document.getElementById('h-duplicate-rows').innerText = formatNum(h.duplicate_rows);
-            document.getElementById('h-format-errors').innerText = formatNum(h.format_errors);
-            document.getElementById('h-logic-anomalies').innerText = formatNum(h.logic_anomalies);
+            document.getElementById('h-format-errors').innerText = formatNum(h.format_errors || 0);
+            const logicEl = document.getElementById('h-logic-anomalies');
+            if (logicEl) logicEl.innerText = formatNum(h.logic_anomalies || 0);
 
             if (healthBadge) {
-                healthBadge.innerText = `Điểm chất lượng: ${h.health_score}% • ${h.health_status}`;
-                healthBadge.className = 'badge ' + (h.health_score >= 85 ? 'green-alert' : (h.health_score >= 55 ? 'yellow-alert' : 'red-alert'));
+                const score = h.health_score != null ? h.health_score : 85;
+                const status = h.health_status || 'Tốt';
+                healthBadge.innerText = `Điểm chất lượng: ${score}% • ${status}`;
+                healthBadge.className = 'badge ' + (score >= 85 ? 'green-alert' : (score >= 55 ? 'yellow-alert' : 'red-alert'));
             }
 
+            const profilingData = step2.columns_profiling || step2.column_profiles || [];
             const tbody = document.getElementById('step2-profiling-tbody');
             if (tbody) {
-                tbody.innerHTML = (step2.columns_profiling || []).map(c => `
+                tbody.innerHTML = profilingData.map(c => `
                     <tr>
-                        <td><strong>${c.column}</strong></td>
-                        <td><span class="badge ${c.type.includes('Metric') ? 'badge-metric' : (c.type.includes('Date') ? 'badge-date' : 'badge-dim')}">${c.type}</span></td>
-                        <td style="${c.missing_count > 0 ? 'color:#dc2626; font-weight:800;' : ''}">${c.missing_count}</td>
-                        <td>${c.missing_pct}%</td>
-                        <td style="${c.format_errors > 0 ? 'color:#d97706; font-weight:800;' : ''}">${c.format_errors}</td>
-                        <td style="${c.anomalies > 0 ? 'color:#7c3aed; font-weight:800;' : ''}">${c.anomalies}</td>
-                        <td style="color:#64748b; font-size:11px;">${(c.samples || []).join(' | ')}</td>
+                        <td><strong>${c.column || c.column_name || ''}</strong></td>
+                        <td><span class="badge ${String(c.type || '').includes('Metric') || c.data_type === 'numeric' ? 'badge-metric' : (String(c.type || '').includes('Date') || c.data_type === 'date' ? 'badge-date' : 'badge-dim')}">${c.type || (c.data_type === 'numeric' ? 'Số (Metric)' : 'Phân loại (Dim)')}</span></td>
+                        <td style="${(c.missing_count || 0) > 0 ? 'color:#dc2626; font-weight:800;' : ''}">${c.missing_count || 0}</td>
+                        <td>${c.missing_pct != null ? c.missing_pct : (c.missing_rate || '0%')}</td>
+                        <td style="${(c.format_errors || 0) > 0 ? 'color:#d97706; font-weight:800;' : ''}">${c.format_errors || 0}</td>
+                        <td style="${(c.anomalies || 0) > 0 ? 'color:#7c3aed; font-weight:800;' : ''}">${c.anomalies || 0}</td>
+                        <td style="color:#64748b; font-size:11px;">${Array.isArray(c.samples) ? c.samples.join(' | ') : (c.mean || '-')}</td>
                     </tr>
                 `).join('');
             }
 
-            const cols = step2.preview_columns || [];
-            document.getElementById('step2-raw-thead').innerHTML = `<tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr>`;
-            document.getElementById('step2-raw-tbody').innerHTML = (step2.preview_rows || []).map(row => {
-                const tds = cols.map(c => {
-                    let cellVal = '';
-                    let isErr = false;
-                    let errType = null;
-                    let errMsg = '';
-                    const rawCell = row[c];
-                    if (rawCell && typeof rawCell === 'object' && 'val' in rawCell) {
-                        cellVal = rawCell.val;
-                        isErr = rawCell.is_error;
-                        errType = rawCell.error_type;
-                        errMsg = rawCell.error_msg || '';
-                    } else {
-                        cellVal = (rawCell !== null && rawCell !== undefined) ? String(rawCell) : '';
-                        isErr = (cellVal === '' || rawCell === null || rawCell === undefined);
-                        errType = isErr ? 'missing' : null;
-                    }
-                    let cls = '';
-                    let badge = '';
-                    if (isErr) {
-                        if (errType === 'missing') { cls = 'cell-missing'; badge = '<span class="cell-badge-err">Null</span>'; }
-                        else if (errType === 'format') { cls = 'cell-format'; badge = '<span class="cell-badge-err">Format</span>'; }
-                        else { cls = 'cell-anomaly'; badge = '<span class="cell-badge-err">Outlier</span>'; }
-                    }
-                    const displayVal = cellVal !== '' ? escapeHtml(cellVal) : '<i>(Trống)</i>';
-                    return `<td class="${cls}" title="${errMsg}">${displayVal}${badge}</td>`;
+            // Lấy danh sách cột động từ preview_columns, columns, hoặc từ dòng đầu tiên
+            const cols = (step2.preview_columns && step2.preview_columns.length > 0)
+                ? step2.preview_columns
+                : ((step2.columns && step2.columns.length > 0)
+                    ? step2.columns
+                    : ((step2.preview_rows && step2.preview_rows.length > 0) ? Object.keys(step2.preview_rows[0]) : []));
+
+            const theadEl = document.getElementById('step2-raw-thead');
+            if (theadEl) theadEl.innerHTML = `<tr>${cols.map(c => `<th>${escapeHtml(c)}</th>`).join('')}</tr>`;
+
+            const tbodyEl = document.getElementById('step2-raw-tbody');
+            if (tbodyEl) {
+                tbodyEl.innerHTML = (step2.preview_rows || []).map(row => {
+                    const tds = cols.map(c => {
+                        let cellVal = '';
+                        let isErr = false;
+                        let errType = null;
+                        let errMsg = '';
+                        const rawCell = row[c];
+                        if (rawCell && typeof rawCell === 'object' && 'val' in rawCell) {
+                            cellVal = rawCell.val;
+                            isErr = rawCell.is_error;
+                            errType = rawCell.error_type;
+                            errMsg = rawCell.error_msg || '';
+                        } else {
+                            cellVal = (rawCell !== null && rawCell !== undefined) ? String(rawCell) : '';
+                            isErr = (cellVal === '' || rawCell === null || rawCell === undefined);
+                            errType = isErr ? 'missing' : null;
+                        }
+                        let cls = '';
+                        let badge = '';
+                        if (isErr) {
+                            if (errType === 'missing') { cls = 'cell-missing'; badge = '<span class="cell-badge-err">Null</span>'; }
+                            else if (errType === 'format') { cls = 'cell-format'; badge = '<span class="cell-badge-err">Format</span>'; }
+                            else { cls = 'cell-anomaly'; badge = '<span class="cell-badge-err">Outlier</span>'; }
+                        }
+                        const displayVal = cellVal !== '' ? escapeHtml(cellVal) : '<i>(Trống)</i>';
+                        return `<td class="${cls}" title="${errMsg}">${displayVal}${badge}</td>`;
+                    }).join('');
+                    return `<tr>${tds}</tr>`;
                 }).join('');
-                return `<tr>${tds}</tr>`;
-            }).join('');
+            }
         }
 
         async function confirmStep2() {
