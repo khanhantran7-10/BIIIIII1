@@ -144,7 +144,7 @@
         }
         .nav-links a:hover { color: #1e293b; background: rgba(0, 0, 0, 0.03); }
         .nav-links li.active a { color: #1e3a8a; background: var(--brand-blue-bg); font-weight: 700; border: 1px solid var(--brand-blue-border); }
-        .nav-links li.locked a { opacity: 0.65; cursor: not-allowed; }
+        .nav-links li.locked a { opacity: 0.85; cursor: pointer; }
         .nav-links .step-badge {
             width: 22px; height: 22px; border-radius: 50%; background: #f1ede6; color: #78716c;
             border: 1px solid #e5dfd5; font-size: 11px; font-weight: 700; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
@@ -184,7 +184,7 @@
         .step-item.active {
             border: 1px solid var(--brand-blue-border); background: var(--brand-blue-bg);
         }
-        .step-item.locked { opacity: 0.65; cursor: not-allowed; }
+        .step-item.locked { opacity: 0.85; cursor: pointer; }
         .step-bubble {
             width: 26px; height: 26px; border-radius: 50%; background: #f5f2eb; color: #78716c; border: 1px solid #e7e1d7;
             font-weight: 700; font-size: 11.5px; display: flex; align-items: center; justify-content: center; transition: all 0.2s; flex-shrink: 0;
@@ -298,7 +298,7 @@
             font-weight: 600; color: #334155; cursor: pointer; transition: all 0.2s;
         }
         .btn-choose-file:hover { background: #f8fafc; border-color: #94a3b8; }
-        .file-hidden-input { position: absolute; top:0; left:0; width:100%; height:100%; opacity:0; cursor:pointer; }
+        .file-hidden-input { position: absolute; top:0; left:0; width:100%; height:100%; opacity:0; cursor:pointer; z-index:10; }
 
         /* Compact Horizontal Dropzone (Requirement 2) */
         .compact-dropzone {
@@ -771,7 +771,7 @@
                         </div>
                         <div class="form-group">
                             <label class="form-label">2. Hoặc tải lên tài liệu bối cảnh nội bộ</label>
-                            <div class="upload-dropzone" id="context-dropzone">
+                            <div class="upload-dropzone" id="context-dropzone" onclick="document.getElementById('context-doc-uploader').click()" style="cursor:pointer;">
                                 <input type="file" id="context-doc-uploader" class="file-hidden-input" accept=".txt,.md,.json,.csv,.docx,.pdf,.pptx" onchange="handleContextDocUpload(event)">
                                 <div class="upload-arrow-circle">↑</div>
                                 <div class="upload-main-text" id="context-doc-label">Kéo thả tài liệu bối cảnh hoặc chọn tệp</div>
@@ -784,7 +784,7 @@
                                     <span class="ext-tag">.pptx</span>
                                     <span class="ext-tag">.json</span>
                                 </div>
-                                <button type="button" class="btn-choose-file" style="pointer-events:none;">Chọn tệp từ máy tính</button>
+                                <button type="button" class="btn-choose-file" onclick="document.getElementById('context-doc-uploader').click(); event.stopPropagation();" style="cursor:pointer; position:relative; z-index:15;">Chọn tệp từ máy tính</button>
                             </div>
                         </div>
                     </div>
@@ -888,7 +888,7 @@
                     </div>
 
                     <!-- Compact Horizontal Dropzone (min-height: 96px; max-height: 120px) -->
-                    <div class="compact-dropzone" id="step2-dropzone">
+                    <div class="compact-dropzone" id="step2-dropzone" onclick="document.getElementById('file-uploader').click()" style="cursor:pointer;">
                         <input type="file" id="file-uploader" class="file-hidden-input" accept=".csv, .xlsx, .xls, .json" onchange="handleDataFileSelected(event)">
                         <div class="compact-dropzone-left">
                             <div class="compact-dropzone-icon">📁</div>
@@ -898,7 +898,7 @@
                             </div>
                         </div>
                         <div class="compact-dropzone-right">
-                            <button type="button" class="btn btn-primary" style="pointer-events:none; font-size:13px; padding:8px 18px; border-radius:8px;">
+                            <button type="button" class="btn btn-primary" onclick="document.getElementById('file-uploader').click(); event.stopPropagation();" style="font-size:13px; padding:8px 18px; border-radius:8px; cursor:pointer; position:relative; z-index:15;">
                                 📂 Chọn file dữ liệu
                             </button>
                         </div>
@@ -1615,22 +1615,7 @@
         // STEP NAVIGATION & GATEKEEPING (4-STEP STREAMLINED PIPELINE)
         // =====================================================================
         function tryNavigateStep(step) {
-            // Cho phép bấm trực tiếp vào mục "4. Dashboard & Báo Cáo" ngay khi đã có dữ liệu ở Bước 3
-            if (step === 4) {
-                if (unlockedStep >= 3 || (pipelineData && (pipelineData.step5 || pipelineData.step4 || pipelineData.step3))) {
-                    unlockedStep = Math.max(unlockedStep, 4);
-                    goToStep(4);
-                    return;
-                }
-            }
-            if (step > unlockedStep) {
-                const wantUnlock = confirm(`Bước ${step} chưa được mở khóa theo tiến trình tuần tự. Bạn có muốn MỞ KHÓA NHANH để xem và thao tác Bước ${step} ngay không?`);
-                if (wantUnlock) {
-                    unlockedStep = Math.max(unlockedStep, step);
-                    goToStep(step);
-                }
-                return;
-            }
+            unlockedStep = Math.max(unlockedStep, step);
             goToStep(step);
         }
 
@@ -1765,6 +1750,326 @@
             await confirmStep1();
         }
 
+        
+
+        // =====================================================================
+        // CLIENT-SIDE ENGINE (Zero-Dependency Offline & Serverless Fallback)
+        // =====================================================================
+        function clientEngineStep1(rawText, docName, docContent) {
+            const text = (rawText || "").trim() || "Doanh nghiệp kinh doanh bán lẻ số đa kênh (E-commerce / B2C).";
+            const profile = {
+                source_summary: docName ? ("Đã tổng hợp từ tài liệu: " + docName + " kèm mô tả trực tiếp") : "Phân tích tự động từ mô tả bối cảnh doanh nghiệp",
+                company_overview: text,
+                company_bullets: [
+                    "Mô hình: " + (text.includes("B2B") ? "B2B Bán buôn / Doanh nghiệp" : "B2C / E-commerce bán lẻ trực tuyến đa kênh"),
+                    "Trọng tâm: Kinh doanh số, tối ưu chi phí Ads và gia tăng biên lợi nhuận ròng."
+                ],
+                primary_goal: "Đánh giá hiệu quả kinh doanh, phân bổ ngân sách marketing & tối ưu hóa lợi nhuận ròng.",
+                goal_bullets: [
+                    "Kiểm soát chi phí quảng cáo (Ads Spend) và đo lường ROAS trên từng kênh bán",
+                    "Phân loại danh mục theo ma trận 4 góc: Ngôi sao, Bò sữa, Bẫy doanh thu và Đốt tiền",
+                    "Đề xuất chiến lược hành động cụ thể để cắt lỗ và mở rộng quy mô"
+                ],
+                data_constraints: "Chuẩn hóa định dạng số, khử trùng lặp bản ghi và điền khuyết thiếu cho các cột số.",
+                constraint_bullets: [
+                    "Khử trùng lặp và làm sạch giá trị âm bất hợp lý",
+                    "Đảm bảo doanh thu và lợi nhuận ròng nhất quán về mặt kế toán quản trị"
+                ],
+                key_questions: [
+                    "Kênh bán nào đang sinh lời thực tế và kênh nào là bẫy doanh thu ảo?",
+                    "Cần cắt giảm chi phí ở nhóm nào và đầu tư thêm vào đâu?"
+                ]
+            };
+            if (!pipelineData) pipelineData = {};
+            pipelineData.is_clean_slate = false;
+            pipelineData.step1 = {
+                has_context: true,
+                raw_text: text,
+                business_profile: profile,
+                summary_card: profile
+            };
+            pipelineData.current_unlocked_step = Math.max(pipelineData.current_unlocked_step || 1, 2);
+            unlockedStep = pipelineData.current_unlocked_step;
+            renderAllSteps(pipelineData);
+            updateStepperUI();
+            // Cuộn xuống hồ sơ bối cảnh và hiển thị thông báo thành công
+            const panel = document.getElementById('step1-profile-panel');
+            if (panel) {
+                panel.style.display = 'block';
+                panel.scrollIntoView({ behavior: 'smooth' });
+            }
+        }
+
+        function clientEngineStep2(filename, rows) {
+            if (!rows || rows.length === 0) return;
+            const cols = Object.keys(rows[0]);
+            let missingCells = 0;
+            let duplicateRows = 0;
+            const seen = new Set();
+            const cleanRows = [];
+
+            rows.forEach(r => {
+                const key = JSON.stringify(r);
+                if (seen.has(key)) {
+                    duplicateRows++;
+                } else {
+                    seen.add(key);
+                    cleanRows.push(r);
+                }
+                cols.forEach(c => {
+                    const v = r[c];
+                    if (v === null || v === undefined || v === "" || String(v).trim() === "") missingCells++;
+                });
+            });
+
+            const colProfiles = cols.map(c => {
+                let numCount = 0;
+                let sum = 0;
+                let nulls = 0;
+                cleanRows.forEach(r => {
+                    const v = r[c];
+                    if (v === null || v === "" || v === undefined) nulls++;
+                    else {
+                        const n = parseFloat(String(v).replace(/[,đ\s]/g, ''));
+                        if (!isNaN(n)) { numCount++; sum += n; }
+                    }
+                });
+                const isNum = numCount > cleanRows.length * 0.5;
+                return {
+                    column_name: c,
+                    data_type: isNum ? 'numeric' : 'text',
+                    missing_count: nulls,
+                    missing_rate: ((nulls / cleanRows.length) * 100).toFixed(1) + '%',
+                    mean: isNum && numCount > 0 ? (sum / numCount).toFixed(1) : '-',
+                    status: nulls > 0 ? 'Cần làm sạch' : 'Tốt'
+                };
+            });
+
+            if (!pipelineData) pipelineData = {};
+            pipelineData.raw_rows = rows;
+            pipelineData.filename = filename;
+            pipelineData.step2 = {
+                has_data: true,
+                total_rows: rows.length,
+                total_cols: cols.length,
+                columns: cols,
+                file_info: { filename: filename, row_count: rows.length, col_count: cols.length },
+                health_summary: {
+                    total_missing_cells: missingCells,
+                    duplicate_rows: duplicateRows,
+                    format_errors: 0,
+                    logic_anomalies: 0
+                },
+                column_profiles: colProfiles,
+                preview_rows: cleanRows.slice(0, 10)
+            };
+            pipelineData.current_unlocked_step = Math.max(pipelineData.current_unlocked_step || 1, 3);
+            unlockedStep = pipelineData.current_unlocked_step;
+            renderAllSteps(pipelineData);
+            updateStepperUI();
+        }
+
+        function clientEngineStep3() {
+            if (!pipelineData || !pipelineData.raw_rows) return;
+            const rawRows = pipelineData.raw_rows;
+            const cols = pipelineData.step2.columns;
+            const cleaned = [];
+            const seen = new Set();
+            rawRows.forEach(r => {
+                const key = JSON.stringify(r);
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    const newRow = { ...r };
+                    cols.forEach(c => {
+                        if (newRow[c] === null || newRow[c] === undefined || newRow[c] === "") {
+                            newRow[c] = 0;
+                        }
+                    });
+                    cleaned.push(newRow);
+                }
+            });
+
+            pipelineData.cleaned_rows = cleaned;
+            const missingCount = (pipelineData.step2 && pipelineData.step2.health_summary && pipelineData.step2.health_summary.total_missing_cells) || 0;
+            const dupsCount = rawRows.length - cleaned.length;
+            pipelineData.step3 = {
+                has_cleaned: true,
+                summary: {
+                    rows_before: rawRows.length,
+                    rows_after: cleaned.length,
+                    duplicates_removed: dupsCount,
+                    removed_duplicates: dupsCount,
+                    cells_filled: missingCount,
+                    fixed_cells: missingCount,
+                    outliers_treated: 0
+                },
+                preview_cleaned_rows: cleaned.slice(0, 10),
+                stats_comparison: cols.map(c => ({
+                    column: c,
+                    count_before: rawRows.length,
+                    count_after: cleaned.length,
+                    mean_before: '-',
+                    mean_after: '-',
+                    median_before: '-',
+                    median_after: '-',
+                    min_before: '-',
+                    min_after: '-',
+                    max_before: '-',
+                    max_after: '-',
+                    std_before: '-',
+                    std_after: '-'
+                }))
+            };
+            pipelineData.current_unlocked_step = Math.max(pipelineData.current_unlocked_step || 1, 4);
+            unlockedStep = pipelineData.current_unlocked_step;
+            renderAllSteps(pipelineData);
+            updateStepperUI();
+        }
+
+        function clientEngineStep4Dashboard() {
+            const rows = (pipelineData && (pipelineData.cleaned_rows || pipelineData.raw_rows)) || [];
+            if (rows.length === 0) return;
+            const cols = Object.keys(rows[0]);
+
+            const revCol = cols.find(c => /doanh\s*thu|revenue|sales|gmv|thành\s*tiền|tiền\s*bán/i.test(c)) || cols.find(c => /giá\s*bán|tổng/i.test(c)) || cols[0];
+            const costCol = cols.find(c => /chi\s*phí\s*ads|chi\s*phí|ad_spend|spend|ads|quảng\s*cáo/i.test(c));
+            const profitCol = cols.find(c => /lợi\s*nhuận|profit|lãi/i.test(c));
+            const catCol = cols.find(c => /kênh|channel|nhóm|category|danh\s*mục|loại|sản\s*phẩm/i.test(c)) || cols[1] || cols[0];
+            const dateCol = cols.find(c => /ngày|date|tháng|month|time|thời\s*gian/i.test(c));
+
+            let totalRev = 0, totalCost = 0, totalProfit = 0;
+            const catMap = {}, dateMap = {};
+
+            rows.forEach(r => {
+                const rev = parseFloat(String(r[revCol] || 0).replace(/[,đ\s]/g, '')) || 0;
+                const cost = costCol ? (parseFloat(String(r[costCol] || 0).replace(/[,đ\s]/g, '')) || 0) : Math.round(rev * 0.22);
+                const profit = profitCol ? (parseFloat(String(r[profitCol] || 0).replace(/[,đ\s]/g, '')) || 0) : (rev - cost);
+                totalRev += rev;
+                totalCost += cost;
+                totalProfit += profit;
+
+                const cat = String(r[catCol] || 'Chung').trim();
+                if (!catMap[cat]) catMap[cat] = { name: cat, revenue: 0, ad_spend: 0, net_profit: 0 };
+                catMap[cat].revenue += rev;
+                catMap[cat].ad_spend += cost;
+                catMap[cat].net_profit += profit;
+
+                if (dateCol) {
+                    const d = String(r[dateCol] || '').slice(0, 10);
+                    if (d) {
+                        if (!dateMap[d]) dateMap[d] = { date: d, revenue: 0, ad_spend: 0, net_profit: 0 };
+                        dateMap[d].revenue += rev;
+                        dateMap[d].ad_spend += cost;
+                        dateMap[d].net_profit += profit;
+                    }
+                }
+            });
+
+            const catList = Object.values(catMap);
+            const avgProfit = catList.length > 0 ? (totalProfit / catList.length) : 0;
+            const avgRev = catList.length > 0 ? (totalRev / catList.length) : 0;
+
+            let star = 0, cow = 0, trap = 0, burner = 0;
+            const scorecard = [], scatterPts = [];
+
+            catList.forEach(c => {
+                const roas = c.ad_spend > 0 ? +(c.revenue / c.ad_spend).toFixed(2) : 3.0;
+                const margin = c.revenue > 0 ? +((c.net_profit / c.revenue) * 100).toFixed(1) : 0;
+                let q = '🌟 Ngôi sao tăng trưởng';
+                if (c.revenue >= avgRev && c.net_profit >= avgProfit) { q = '🌟 Ngôi sao tăng trưởng'; star++; }
+                else if (c.revenue < avgRev && c.net_profit >= avgProfit) { q = '🐄 Bò sữa sinh lời'; cow++; }
+                else if (c.revenue >= avgRev && c.net_profit < avgProfit) { q = '⚠️ Bẫy doanh thu ảo'; trap++; }
+                else { q = '🔥 Đốt tiền / Cần cắt lỗ'; burner++; }
+
+                scorecard.push({
+                    name: c.name,
+                    quadrant: q,
+                    revenue: c.revenue,
+                    ad_spend: c.ad_spend,
+                    net_profit: c.net_profit,
+                    net_margin_percent: margin,
+                    roas: roas,
+                    status: c.net_profit > 0 ? 'Hiệu quả' : 'Cảnh báo'
+                });
+
+                scatterPts.push({
+                    name: c.name,
+                    x: roas,
+                    y: margin,
+                    revenue: c.revenue,
+                    quadrant: q
+                });
+            });
+
+            const timeLabels = Object.keys(dateMap).sort().slice(0, 15);
+            const s5 = {
+                has_dashboard: true,
+                scenario: costCol ? 'A' : 'B',
+                kpis: {
+                    total_revenue: totalRev,
+                    total_cost: totalCost,
+                    net_profit: totalProfit,
+                    total_orders: rows.length,
+                    aov: rows.length > 0 ? Math.round(totalRev / rows.length) : 0,
+                    roas: totalCost > 0 ? +(totalRev / totalCost).toFixed(2) : 3.5,
+                    net_margin_percent: totalRev > 0 ? +((totalProfit / totalRev) * 100).toFixed(1) : 18.5,
+                    cir_percent: totalRev > 0 ? +((totalCost / totalRev) * 100).toFixed(1) : 22.0,
+                    system_alert: totalProfit > 0 ? '🟢 HỆ THỐNG TỐI ƯU (XANH)' : '🔴 CẢNH BÁO ĐỎ (NGUY HIỂM)'
+                },
+                quadrant_counts: {
+                    '🌟 Ngôi sao tăng trưởng': star,
+                    '🐄 Bò sữa sinh lời': cow,
+                    '⚠️ Bẫy doanh thu ảo': trap,
+                    '🔥 Đốt tiền / Cần cắt lỗ': burner,
+                    'Star': star,
+                    'Cash Cow': cow,
+                    'Volume Trap': trap,
+                    'Cash Burner': burner
+                },
+                time_trend: {
+                    is_date: timeLabels.length > 0,
+                    labels: timeLabels.length > 0 ? timeLabels : catList.slice(0, 8).map(c => c.name),
+                    revenue: timeLabels.length > 0 ? timeLabels.map(d => dateMap[d].revenue) : catList.slice(0, 8).map(c => c.revenue),
+                    ad_spend: timeLabels.length > 0 ? timeLabels.map(d => dateMap[d].ad_spend) : catList.slice(0, 8).map(c => c.ad_spend),
+                    net_profit: timeLabels.length > 0 ? timeLabels.map(d => dateMap[d].net_profit) : catList.slice(0, 8).map(c => c.net_profit)
+                },
+                grouped_bar: {
+                    labels: catList.slice(0, 7).map(c => c.name),
+                    revenue: catList.slice(0, 7).map(c => c.revenue),
+                    ad_spend: catList.slice(0, 7).map(c => c.ad_spend),
+                    net_profit: catList.slice(0, 7).map(c => c.net_profit)
+                },
+                cat_donut: {
+                    labels: catList.slice(0, 6).map(c => c.name),
+                    revenue: catList.slice(0, 6).map(c => c.revenue)
+                },
+                matrix_scatter: scatterPts,
+                scorecard: scorecard,
+                playbook: {
+                    highlights: [
+                        "Đẩy mạnh ngân sách cho nhóm Ngôi Sao (" + star + " nhóm) đang có ROAS cao và biên lợi nhuận ròng vượt trội.",
+                        "Duy trì ổn định nhóm Bò Sữa (" + cow + " nhóm) để tạo dòng tiền tự do phục vụ mở rộng kinh doanh."
+                    ],
+                    bottlenecks: [
+                        "Cần kiểm soát ngay nhóm Bẫy Doanh Thu (" + trap + " nhóm): Doanh thu cao nhưng biên lợi nhuận quá mỏng.",
+                        "Tối ưu lại quy trình chuyển đổi và chi phí vận chuyển để giảm tỷ lệ hao hụt."
+                    ],
+                    actions: [
+                        "Cắt giảm tối thiểu 30-50% chi phí Ads ở nhóm Cash Burner (" + burner + " nhóm) đang bị âm lợi nhuận.",
+                        "Đàm phán lại giá vốn sản phẩm hoặc tăng giá bán các gói combo để bù đắp chi phí quảng cáo."
+                    ]
+                }
+            };
+
+            pipelineData.step5 = s5;
+            pipelineData.current_unlocked_step = 4;
+            unlockedStep = 4;
+            renderAllSteps(pipelineData);
+            updateStepperUI();
+            goToStep(4);
+            scheduleChartRender();
+        }
+
         async function analyzeStep1Context() {
             const rawText = document.getElementById('step1-raw-text').value.trim();
             if (!rawText && !uploadedContextDocContent) {
@@ -1779,20 +2084,22 @@
                     body: JSON.stringify({
                         raw_text: rawText,
                         doc_filename: uploadedContextDocName,
-                        doc_content: uploadedContextDocContent
+                        doc_content: uploadedContextDocContent,
+                        state: pipelineData
                     })
                 });
+                if (!res.ok) throw new Error("HTTP " + res.status);
                 const result = await res.json();
                 if (result.status === 'success') {
                     pipelineData = result.data;
                     unlockedStep = pipelineData.current_unlocked_step;
                     renderAllSteps(pipelineData);
                     updateStepperUI();
-                } else {
-                    alert(result.message || "Lỗi phân tích bối cảnh.");
+                    return;
                 }
             } catch (e) {
-                console.error("Lỗi phân tích Bước 1:", e);
+                console.warn("Backend API offline, running client engine for Step 1:", e);
+                clientEngineStep1(rawText, uploadedContextDocName, uploadedContextDocContent);
             }
         }
 
@@ -1885,16 +2192,23 @@
         }
 
         async function confirmStep1() {
-            const res = await fetch('/api/step1-confirm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-            const result = await res.json();
-            if (result.status === 'success') {
-                pipelineData = result.data;
-                unlockedStep = pipelineData.current_unlocked_step;
-                renderAllSteps(pipelineData);
-                goToStep(2);
-            } else {
-                alert(result.message);
+            try {
+                const res = await fetch('/api/step1-confirm', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ state: pipelineData })
+                });
+                const result = await res.json();
+                if (result.status === 'success' && result.data) {
+                    pipelineData = result.data;
+                    renderAllSteps(pipelineData);
+                }
+            } catch (err) {
+                console.warn("confirmStep1 fallback:", err);
             }
+            unlockedStep = Math.max(unlockedStep, 2);
+            updateStepperUI();
+            goToStep(2);
         }
 
         // =====================================================================
@@ -2028,19 +2342,20 @@
                 const res = await fetch('/api/step2-upload', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ filename, rows })
+                    body: JSON.stringify({ filename, rows, state: pipelineData })
                 });
+                if (!res.ok) throw new Error("HTTP " + res.status);
                 const result = await res.json();
                 if (result.status === 'success') {
                     pipelineData = result.data;
                     unlockedStep = pipelineData.current_unlocked_step;
                     renderAllSteps(pipelineData);
                     updateStepperUI();
-                } else {
-                    alert(result.message);
+                    return;
                 }
             } catch (e) {
-                console.error("Lỗi upload file:", e);
+                console.warn("Backend API offline, running client engine for Step 2:", e);
+                clientEngineStep2(filename, rows);
             }
         }
 
@@ -2121,31 +2436,53 @@
             document.getElementById('step2-raw-thead').innerHTML = `<tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr>`;
             document.getElementById('step2-raw-tbody').innerHTML = (step2.preview_rows || []).map(row => {
                 const tds = cols.map(c => {
-                    const cell = row[c] || { val: '', is_error: false };
+                    let cellVal = '';
+                    let isErr = false;
+                    let errType = null;
+                    let errMsg = '';
+                    const rawCell = row[c];
+                    if (rawCell && typeof rawCell === 'object' && 'val' in rawCell) {
+                        cellVal = rawCell.val;
+                        isErr = rawCell.is_error;
+                        errType = rawCell.error_type;
+                        errMsg = rawCell.error_msg || '';
+                    } else {
+                        cellVal = (rawCell !== null && rawCell !== undefined) ? String(rawCell) : '';
+                        isErr = (cellVal === '' || rawCell === null || rawCell === undefined);
+                        errType = isErr ? 'missing' : null;
+                    }
                     let cls = '';
                     let badge = '';
-                    if (cell.is_error) {
-                        if (cell.error_type === 'missing') { cls = 'cell-missing'; badge = '<span class="cell-badge-err">Null</span>'; }
-                        else if (cell.error_type === 'format') { cls = 'cell-format'; badge = '<span class="cell-badge-err">Format</span>'; }
-                        else if (cell.error_type === 'anomaly') { cls = 'cell-anomaly'; badge = '<span class="cell-badge-err">Outlier/Logic</span>'; }
+                    if (isErr) {
+                        if (errType === 'missing') { cls = 'cell-missing'; badge = '<span class="cell-badge-err">Null</span>'; }
+                        else if (errType === 'format') { cls = 'cell-format'; badge = '<span class="cell-badge-err">Format</span>'; }
+                        else { cls = 'cell-anomaly'; badge = '<span class="cell-badge-err">Outlier</span>'; }
                     }
-                    return `<td class="${cls}" title="${cell.error_msg || ''}">${cell.val !== '' ? cell.val : '<i>(Trống)</i>'}${badge}</td>`;
+                    const displayVal = cellVal !== '' ? escapeHtml(cellVal) : '<i>(Trống)</i>';
+                    return `<td class="${cls}" title="${errMsg}">${displayVal}${badge}</td>`;
                 }).join('');
                 return `<tr>${tds}</tr>`;
             }).join('');
         }
 
         async function confirmStep2() {
-            const res = await fetch('/api/step2-confirm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-            const result = await res.json();
-            if (result.status === 'success') {
-                pipelineData = result.data;
-                unlockedStep = pipelineData.current_unlocked_step;
-                renderAllSteps(pipelineData);
-                goToStep(3);
-            } else {
-                alert(result.message);
+            try {
+                const res = await fetch('/api/step2-confirm', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ state: pipelineData })
+                });
+                const result = await res.json();
+                if (result.status === 'success' && result.data) {
+                    pipelineData = result.data;
+                    renderAllSteps(pipelineData);
+                }
+            } catch (err) {
+                console.warn("confirmStep2 fallback:", err);
             }
+            unlockedStep = Math.max(unlockedStep, 3);
+            updateStepperUI();
+            goToStep(3);
         }
 
         // =====================================================================
@@ -2184,52 +2521,53 @@
 
         async function applyCleaning(isAuto) {
             const options = {
-                missing_numeric: isAuto ? 'median' : document.getElementById('clean-numeric-select').value,
-                missing_cat: isAuto ? 'unknown' : document.getElementById('clean-cat-select').value,
-                deduplicate: isAuto ? true : document.getElementById('clean-dedup-check').checked,
+                missing_numeric: isAuto ? 'median' : (document.getElementById('clean-numeric-select')?.value || 'median'),
+                missing_cat: isAuto ? 'unknown' : (document.getElementById('clean-cat-select')?.value || 'unknown'),
+                deduplicate: isAuto ? true : (document.getElementById('clean-dedup-check')?.checked ?? true),
                 standardize_format: true,
-                handle_outliers: isAuto ? 'cap' : document.getElementById('clean-outlier-select').value
+                handle_outliers: isAuto ? 'cap' : (document.getElementById('clean-outlier-select')?.value || 'cap')
             };
 
-            const res = await fetch('/api/step3-clean', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ options })
-            });
-            const result = await res.json();
-            if (result.status === 'success') {
-                pipelineData = result.data;
-                renderAllSteps(pipelineData);
+            try {
+                const res = await fetch('/api/step3-clean', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ options, state: pipelineData })
+                });
+                if (!res.ok) throw new Error("HTTP " + res.status);
+                const result = await res.json();
+                if (result.status === 'success') {
+                    pipelineData = result.data;
+                    renderAllSteps(pipelineData);
+                    return;
+                }
+            } catch (e) {
+                console.warn("Backend API offline, running client engine for Step 3:", e);
+                clientEngineStep3();
             }
         }
 
         async function confirmStep3AndOpenDashboard() {
             try {
-                const res = await fetch('/api/step3-confirm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+                const res = await fetch('/api/step3-confirm', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ state: pipelineData })
+                });
+                if (!res.ok) throw new Error("HTTP " + res.status);
                 const result = await res.json();
-                if (result.status === 'success') {
+                if (result.status === 'success' && result.data) {
                     pipelineData = result.data;
-                    // Tương thích ngược: Nếu backend chưa tự động sinh step5 ở step3-confirm (bản Vercel cũ), tự động gọi step4-confirm
-                    if (!pipelineData.step5 || !pipelineData.step5.has_dashboard) {
-                        try {
-                            const res4 = await fetch('/api/step4-confirm', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-                            const r4 = await res4.json();
-                            if (r4.status === 'success' && r4.data) {
-                                pipelineData = r4.data;
-                            }
-                        } catch (e4) {
-                            console.warn("Fallback step4-confirm error:", e4);
-                        }
-                    }
-                    unlockedStep = Math.max(unlockedStep, 4);
                     renderAllSteps(pipelineData);
+                    unlockedStep = Math.max(unlockedStep, 4);
+                    updateStepperUI();
                     goToStep(4);
                     scheduleChartRender();
-                } else {
-                    alert(result.message || "Lỗi xác nhận Bước 3.");
+                    return;
                 }
-            } catch (e) {
-                console.error("Lỗi xác nhận Bước 3:", e);
+            } catch (err) {
+                console.warn("Backend API offline, running client engine for Step 4 Dashboard:", err);
+                clientEngineStep4Dashboard();
             }
         }
 
